@@ -1,0 +1,2667 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Control de Envíos — La Anónima</title>
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.6.0/jspdf.plugin.autotable.min.js"></script>
+
+<script>
+  // ============================================================
+  // ✅ BACKEND: Google Sheets via Apps Script
+  // ============================================================
+  const GAS_URL = "https://script.google.com/macros/s/AKfycbxGrCUtXWav-jBSmpm_8ikwafaFsGHvhvfqNwuMjapn3LpldnxLVNbHgw5tCz9pGoPm/exec";
+
+  let envios = [];
+  let editandoId = null;
+  let fotoBase64 = null;
+  let mapa = null;
+  let marcadorOrigen = null;
+  let marcadorDestino = null;
+
+  // Coordenadas sucursales
+  // Sucursales por defecto — se sobreescriben desde Admin
+  const SUCURSALES_DEFAULT = {
+    "225": { lat: -38.946037, lng: -68.058389, label: "Suc. 225 — Av. San Juan 51", direccion: "Av. San Juan 51", color: "#e63946", rol: "origen" },
+    "235": { lat: -38.951004, lng: -68.030905, label: "Suc. 235 — Alderete 1985",   direccion: "Alderete 1985",   color: "#2196f3", rol: "destino" }
+  };
+
+  function cargarConfigSucursales() {
+    try {
+      const saved = localStorage.getItem('suc_config');
+      if (saved) return JSON.parse(saved);
+    } catch(e) {}
+    return JSON.parse(JSON.stringify(SUCURSALES_DEFAULT));
+  }
+
+  function guardarConfigSucursales(cfg) {
+    localStorage.setItem('suc_config', JSON.stringify(cfg));
+  }
+
+  let SUCURSALES = cargarConfigSucursales();
+
+  function getSucActiva(tipo) {
+    // Prioridad: 1) envío en curso, 2) select del formulario, 3) localStorage, 4) rol en config
+    if (window._envioEnCurso) {
+      const id = tipo === 'origen' ? window._envioEnCurso.origenId : window._envioEnCurso.destinoId;
+      if (id && SUCURSALES[id]) return [id, SUCURSALES[id]];
+    }
+    const selId = tipo === 'origen'
+      ? (document.getElementById('formOrigen') ? document.getElementById('formOrigen').value : null)
+      : (document.getElementById('formDestino') ? document.getElementById('formDestino').value : null);
+    if (selId && SUCURSALES[selId]) return [selId, SUCURSALES[selId]];
+    const stored = localStorage.getItem(tipo === 'origen' ? 'suc_origen_active' : 'suc_destino_active');
+    if (stored && SUCURSALES[stored]) return [stored, SUCURSALES[stored]];
+    return Object.entries(SUCURSALES).find(([,s]) => s.rol === tipo);
+  }
+  function getSucOrigen()  { return getSucActiva('origen');  }
+  function getSucDestino() { return getSucActiva('destino'); }
+
+  function actualizarRutaBadge() {
+    const o = getSucOrigen();
+    const d = getSucDestino();
+    // badge eliminado del header
+    // Empresa
+    const empresa = localStorage.getItem('sys_empresa') || 'LA ANÓNIMA';
+    const logoEl = document.getElementById('logoEmpresa');
+    if (logoEl) {
+      // Separar última palabra para colorearla
+      const partes = empresa.trim().split(' ');
+      const ultima = partes.pop();
+      const resto = partes.join(' ');
+      logoEl.innerHTML = (resto ? resto + ' ' : '') + '<span>' + ultima + '</span>';
+    }
+    // Subtítulo
+    const sub = localStorage.getItem('sys_nombre') || 'Sistema de Entregas';
+    const sysname = document.getElementById('sysname');
+    if (sysname) sysname.textContent = sub;
+    // Color acento
+    const color = localStorage.getItem('sys_color') || '#e63946';
+    document.documentElement.style.setProperty('--accent', color);
+  }
+
+
+
+  // Variables globales del tracker
+  let rutaCoords = [];       // Array de [lat,lng] de la ruta real
+  let rutaLayerPendiente = null;  // Tramo gris (por recorrer)
+  let rutaLayerRecorrido = null;  // Tramo rojo vivo (ya recorrido)
+  let rutaLayer = null;           // Alias para borrarRuta compat
+  let flechasLayers = [];
+  let rutaDistancias = [];   // Distancias acumuladas en km por punto
+  let rutaDistTotal = 0;     // Distancia total en km
+  let marcadorCamion = null;
+  let trackerInterval = null;
+  const VEL_KMH = 30;
+
+  // Calcular distancia entre dos puntos [lat,lng] en km (Haversine)
+  function haversine(a, b) {
+    const R = 6371;
+    const dLat = (b[0]-a[0]) * Math.PI/180;
+    const dLng = (b[1]-a[1]) * Math.PI/180;
+    const s = Math.sin(dLat/2)*Math.sin(dLat/2) +
+              Math.cos(a[0]*Math.PI/180)*Math.cos(b[0]*Math.PI/180)*
+              Math.sin(dLng/2)*Math.sin(dLng/2);
+    return R * 2 * Math.atan2(Math.sqrt(s), Math.sqrt(1-s));
+  }
+
+  // Dado km recorrido, devuelve la posicion interpolada en la ruta
+  function posEnRuta(kmRecorrido) {
+    if (!rutaCoords.length) return null;
+    if (kmRecorrido <= 0) return rutaCoords[0];
+    if (kmRecorrido >= rutaDistTotal) return rutaCoords[rutaCoords.length-1];
+    for (let i = 1; i < rutaDistancias.length; i++) {
+      if (rutaDistancias[i] >= kmRecorrido) {
+        const segStart = rutaDistancias[i-1];
+        const segEnd   = rutaDistancias[i];
+        const t = (kmRecorrido - segStart) / (segEnd - segStart);
+        const a = rutaCoords[i-1];
+        const b = rutaCoords[i];
+        return [a[0] + (b[0]-a[0])*t, a[1] + (b[1]-a[1])*t];
+      }
+    }
+    return rutaCoords[rutaCoords.length-1];
+  }
+
+  // Parsear "HH:MM" a minutos desde medianoche
+  function horaAMin(h) {
+    if (!h) return null;
+    const parts = h.split(':');
+    return parseInt(parts[0])*60 + parseInt(parts[1]);
+  }
+
+  // Formatear minutos -> "HH:MM"
+  function minAHora(m) {
+    const h = Math.floor(((m % 1440) + 1440) % 1440 / 60);
+    const min = ((m % 1440) + 1440) % 1440 % 60;
+    return String(h).padStart(2,'0') + ':' + String(min).padStart(2,'0');
+  }
+
+  function actualizarTracker() {
+    if (!rutaCoords.length) return;
+
+    // Buscar el envio activo: tiene horaSalida pero no horaLlegada
+    const ahora = new Date();
+    const minAhora = ahora.getHours()*60 + ahora.getMinutes();
+
+    // Buscar en el formulario si hay un envio en curso
+    const hSalida = document.getElementById('horaSalida') ? document.getElementById('horaSalida').value : '';
+    const hLlegada = document.getElementById('horaLlegada') ? document.getElementById('horaLlegada').value : '';
+
+    const hoy = new Date().toISOString().slice(0,10);
+    let envioActivo = null;
+    // Prioridad: envío en curso (entre salida y recepción)
+    if (window._envioEnCurso && window._envioEnCurso.horaSalida) {
+      envioActivo = { horaSalida: window._envioEnCurso.horaSalida, horaLlegada: hLlegada || null };
+    } else if (hSalida && !hLlegada) {
+      envioActivo = { horaSalida: hSalida, horaLlegada: null };
+    } else if (envios && envios.length) {
+      envioActivo = envios.find(function(e) {
+        return e.fecha === hoy && e.horaSalida && !e.horaLlegada;
+      }) || envios.find(function(e) {
+        return e.fecha === hoy && e.horaSalida;
+      });
+    }
+
+    const panel = document.getElementById('trackerPanel');
+    if (!envioActivo || !envioActivo.horaSalida) {
+      panel.innerHTML = '<span style="color:#666;font-size:13px">Sin envío activo hoy. Registrá una salida para ver el tracker.</span>';
+      if (marcadorCamion) { marcadorCamion.remove(); marcadorCamion = null; }
+      return;
+    }
+
+    const minSalida = horaAMin(envioActivo.horaSalida);
+    const tiempoRutaMin = (rutaDistTotal / VEL_KMH) * 60;
+    const etaMin = minSalida + tiempoRutaMin;
+    const etaHora = minAHora(Math.round(etaMin));
+
+    // Si ya llegó
+    if (envioActivo.horaLlegada) {
+      const minLlegada = horaAMin(envioActivo.horaLlegada);
+      const demoraMins = minLlegada - Math.round(etaMin);
+      const llegadoColor = demoraMins > 5 ? '#ff9800' : '#4caf50';
+      const demoraTexto = demoraMins > 0 ? '(' + demoraMins + ' min de demora)' : '(a tiempo)';
+      panel.innerHTML =
+        '<div class="tracker-row">' +
+        '<span class="tracker-badge" style="background:rgba(76,175,80,0.15);color:#4caf50">✓ LLEGÓ</span>' +
+        '<span>Salida: <b>' + envioActivo.horaSalida + '</b></span>' +
+        '<span>ETA estimada: <b>' + etaHora + '</b></span>' +
+        '<span>Llegada real: <b style="color:' + llegadoColor + '">' + envioActivo.horaLlegada + '</b></span>' +
+        '<span style="color:' + llegadoColor + '">' + demoraTexto + '</span>' +
+        '</div>';
+      // Poner camión en destino
+      if (mapa) {
+        const dest = rutaCoords[rutaCoords.length-1];
+        actualizarMarcadorCamion(dest, 0, true);
+      }
+      return;
+    }
+
+    // En tránsito
+    const minTranscurridos = minAhora - minSalida;
+    const kmRecorrido = Math.min((minTranscurridos / 60) * VEL_KMH, rutaDistTotal);
+    const kmRestante = Math.max(rutaDistTotal - kmRecorrido, 0);
+    const minRestantes = Math.round((kmRestante / VEL_KMH) * 60);
+    const etaActual = minAhora + minRestantes;
+    const etaActualHora = minAHora(etaActual);
+
+    const demoraVsETA = etaActual - Math.round(etaMin);
+    let estadoColor, estadoTexto, estadoBg;
+    if (minTranscurridos < 0) {
+      estadoColor = '#888'; estadoTexto = 'AÚN NO SALIÓ'; estadoBg = 'rgba(128,128,128,0.1)';
+    } else if (kmRecorrido >= rutaDistTotal) {
+      estadoColor = '#888'; estadoTexto = 'DEBERÍA HABER LLEGADO'; estadoBg = 'rgba(255,152,0,0.15)';
+    } else if (demoraVsETA <= 2) {
+      estadoColor = '#4caf50'; estadoTexto = 'EN CAMINO · A TIEMPO'; estadoBg = 'rgba(76,175,80,0.1)';
+    } else {
+      estadoColor = '#ff9800'; estadoTexto = 'DEMORADO +' + demoraVsETA + ' min'; estadoBg = 'rgba(255,152,0,0.12)';
+    }
+
+    const pct = Math.min(100, Math.round((kmRecorrido / rutaDistTotal) * 100));
+
+    panel.innerHTML =
+      '<div class="tracker-row">' +
+        '<span class="tracker-badge" style="background:' + estadoBg + ';color:' + estadoColor + '">' + estadoTexto + '</span>' +
+        '<span>Salida: <b>' + envioActivo.horaSalida + '</b></span>' +
+        '<span>ETA original: <b>' + etaHora + '</b></span>' +
+        '<span>ETA actual: <b style="color:' + estadoColor + '">' + etaActualHora + '</b></span>' +
+        '<span style="color:#aaa">' + kmRecorrido.toFixed(1) + ' / ' + rutaDistTotal.toFixed(1) + ' km</span>' +
+      '</div>' +
+      '<div class="tracker-barra-wrap">' +
+        '<div class="tracker-barra-fill" style="width:' + pct + '%;background:' + estadoColor + '"></div>' +
+        '<span class="tracker-barra-pct">' + pct + '%</span>' +
+      '</div>';
+
+    // Mover marcador del camión y actualizar tramo recorrido
+    if (mapa && minTranscurridos >= 0) {
+      const pos = posEnRuta(kmRecorrido);
+      if (pos) {
+        actualizarMarcadorCamion(pos, pct, false);
+        actualizarProgresoCamino(kmRecorrido);
+      }
+    }
+  }
+
+  function actualizarMarcadorCamion(pos, pct, llegado) {
+    const html = llegado
+      ? '<div style="font-size:28px;filter:drop-shadow(0 2px 4px #000)">🏁</div>'
+      : '<div style="font-size:26px;filter:drop-shadow(0 2px 6px rgba(0,0,0,0.6));animation:pulso 1.2s infinite alternate">🚛</div>';
+    const icon = L.divIcon({ className: '', html: html, iconAnchor: [13, 13] });
+    if (marcadorCamion) {
+      marcadorCamion.setLatLng(pos);
+      marcadorCamion.setIcon(icon);
+    } else {
+      marcadorCamion = L.marker(pos, { icon: icon, zIndexOffset: 1000 }).addTo(mapa);
+    }
+  }
+
+  function hayEnvioActivo() {
+    // Envío en curso (registrada salida, esperando recepción)
+    if (window._envioEnCurso && window._envioEnCurso.horaSalida) return true;
+    const hoy = new Date().toISOString().slice(0,10);
+    const hSalida = document.getElementById('horaSalida') ? document.getElementById('horaSalida').value : '';
+    if (hSalida) return true;
+    if (envios && envios.length) {
+      return !!envios.find(function(e) { return e.fecha === hoy && e.horaSalida; });
+    }
+    return false;
+  }
+
+  // Dado km recorrido, devuelve el índice del punto más cercano en rutaCoords
+  function indicePorKm(km) {
+    for (let i = 1; i < rutaDistancias.length; i++) {
+      if (rutaDistancias[i] >= km) return i;
+    }
+    return rutaCoords.length - 1;
+  }
+
+  // Actualiza las dos polylines según km recorrido
+  function actualizarProgresoCamino(kmRecorrido) {
+    if (!mapa || !rutaCoords.length) return;
+    const idx = indicePorKm(kmRecorrido);
+    const pos = posEnRuta(kmRecorrido);
+
+    // Tramo recorrido: desde inicio hasta posición actual
+    const coordsHecho = rutaCoords.slice(0, idx).concat(pos ? [pos] : []);
+    // Tramo pendiente: desde posición actual hasta fin
+    const coordsPendiente = (pos ? [pos] : []).concat(rutaCoords.slice(idx));
+
+    if (rutaLayerRecorrido) {
+      rutaLayerRecorrido.setLatLngs(coordsHecho);
+    }
+    if (rutaLayerPendiente) {
+      rutaLayerPendiente.setLatLngs(coordsPendiente);
+    }
+  }
+
+  async function dibujarRuta() {
+    if (!mapa) return;
+    const [origenId, origen] = getSucOrigen() || ['225', SUCURSALES_DEFAULT['225']];
+    const [destinoId, destino] = getSucDestino() || ['235', SUCURSALES_DEFAULT['235']];
+    const osrmUrl = 'https://router.project-osrm.org/route/v1/driving/' + origen.lng + ',' + origen.lat + ';' + destino.lng + ',' + destino.lat + '?overview=full&geometries=geojson';
+
+    try {
+      document.getElementById('mapaStatus').textContent = 'Calculando ruta por calles...';
+      const res = await fetch(osrmUrl);
+      const osrmData = await res.json();
+      if (osrmData.routes && osrmData.routes.length) {
+        rutaCoords = osrmData.routes[0].geometry.coordinates.map(function(c) { return [c[1], c[0]]; });
+
+        rutaDistancias = [0];
+        for (let i = 1; i < rutaCoords.length; i++) {
+          rutaDistancias.push(rutaDistancias[i-1] + haversine(rutaCoords[i-1], rutaCoords[i]));
+        }
+        rutaDistTotal = rutaDistancias[rutaDistancias.length-1];
+
+        // Capa gris — ruta completa por recorrer (aparece primero)
+        rutaLayerPendiente = L.polyline(rutaCoords, {
+          color: '#444', weight: 5, opacity: 0.55, dashArray: '6,5'
+        }).addTo(mapa);
+        rutaLayer = rutaLayerPendiente; // alias para borrarRuta
+
+        // Capa roja — tramo recorrido (empieza vacía en el origen)
+        rutaLayerRecorrido = L.polyline([rutaCoords[0]], {
+          color: '#e63946', weight: 6, opacity: 0.95, lineCap: 'round', lineJoin: 'round'
+        }).addTo(mapa);
+
+        // Flechas de dirección sobre la capa pendiente
+        flechasLayers = [];
+        const step = Math.max(1, Math.floor(rutaCoords.length / 4));
+        for (let i = step; i < rutaCoords.length - 2; i += step) {
+          const pf = rutaCoords[i];
+          const pt = rutaCoords[Math.min(i+3, rutaCoords.length-1)];
+          const ang = Math.atan2(pt[1]-pf[1], pt[0]-pf[0]) * 180 / Math.PI;
+          const ai = L.divIcon({
+            className: '',
+            html: '<div style="transform:rotate(' + (ang-90) + 'deg);font-size:16px;color:#666;filter:drop-shadow(0 0 2px #000)">&#9658;</div>',
+            iconAnchor: [8,8]
+          });
+          flechasLayers.push(L.marker(pf, { icon: ai, interactive: false }).addTo(mapa));
+        }
+
+        const dist = rutaDistTotal.toFixed(1);
+        const minsRuta = Math.round((rutaDistTotal / VEL_KMH) * 60);
+        document.getElementById('mapaStatus').textContent = '🚛 En camino — ' + dist + ' km · ~' + minsRuta + ' min a ' + VEL_KMH + ' km/h';
+        mapa.fitBounds(rutaLayerPendiente.getBounds(), { padding: [40, 40] });
+
+        actualizarTracker();
+        if (trackerInterval) clearInterval(trackerInterval);
+        trackerInterval = setInterval(actualizarTracker, 15000); // cada 15s para más fluidez
+      }
+    } catch(e) {
+      document.getElementById('mapaStatus').textContent = 'Sin conexion al servicio de rutas';
+    }
+  }
+
+  function borrarRuta() {
+    if (rutaLayerPendiente) { rutaLayerPendiente.remove(); rutaLayerPendiente = null; }
+    if (rutaLayerRecorrido) { rutaLayerRecorrido.remove(); rutaLayerRecorrido = null; }
+    rutaLayer = null;
+    flechasLayers.forEach(function(m) { m.remove(); });
+    flechasLayers = [];
+    rutaCoords = [];
+    rutaDistancias = [];
+    rutaDistTotal = 0;
+    if (marcadorCamion) { marcadorCamion.remove(); marcadorCamion = null; }
+    if (trackerInterval) { clearInterval(trackerInterval); trackerInterval = null; }
+  }
+
+  window.initMapa = async function() {
+    if (mapa) {
+      // Mapa ya existe — solo verificar si hay que dibujar la ruta
+      if (hayEnvioActivo() && !rutaLayer) await dibujarRuta();
+      else if (!hayEnvioActivo() && rutaLayer) borrarRuta();
+      actualizarTracker();
+      return;
+    }
+    mapa = L.map('mapa').setView([-38.9485, -68.0446], 14);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '© OpenStreetMap'
+    }).addTo(mapa);
+
+    // Marcadores sucursales siempre visibles
+    Object.entries(SUCURSALES).forEach(([id, s]) => {
+      const icon = L.divIcon({
+        className: '',
+        html: '<div style="background:' + s.color + ';color:#fff;padding:5px 10px;border-radius:5px;font-family:DM Sans,sans-serif;font-weight:600;font-size:12px;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,0.4)">' + s.label + '</div>',
+        iconAnchor: [30, 10]
+      });
+      L.marker([s.lat, s.lng], { icon }).addTo(mapa);
+    });
+
+    const [,origen] = getSucOrigen() || ['225', SUCURSALES_DEFAULT['225']];
+    const [,destino] = getSucDestino() || ['235', SUCURSALES_DEFAULT['235']];
+
+    if (hayEnvioActivo()) {
+      // Hay envío activo — dibujar ruta
+      await dibujarRuta();
+    } else {
+      // Sin envío activo — mostrar mapa con marcadores, sin ruta
+      const bounds = L.latLngBounds([
+        [origen.lat, origen.lng],
+        [destino.lat, destino.lng]
+      ]);
+      mapa.fitBounds(bounds, { padding: [60, 60] });
+      document.getElementById('mapaStatus').textContent = '📍 Sin envío activo hoy — la ruta se dibujará al confirmar la salida del camión';
+      actualizarTracker();
+    }
+  };
+
+  // ── Google Apps Script helpers ───────────────────────────────────────────
+  async function gasCall(params) {
+    // Limpiar nulls
+    const clean = {};
+    for (const k in params) {
+      const v = params[k];
+      clean[k] = (v === null || v === undefined) ? '' : v;
+    }
+    const qs = Object.entries(clean)
+      .map(([k,v]) => encodeURIComponent(k) + '=' + encodeURIComponent(String(v)))
+      .join('&');
+    const url = GAS_URL + '?' + qs;
+    const r = await fetch(url, { redirect: 'follow', cache: 'no-store' });
+    const text = await r.text();
+    try { return JSON.parse(text); }
+    catch(e) { throw new Error('Respuesta inválida: ' + text.slice(0, 200)); }
+  }
+
+  async function gasGet(accion) {
+    return gasCall({ accion: accion });
+  }
+
+  async function gasPost(body) {
+    const params = { accion: body.accion };
+    if (body.id) params.id = body.id;
+    if (body.data) {
+      const d = body.data;
+      params.fecha            = d.fecha         || '';
+      params.chofer           = d.chofer        || '';
+      params.patente          = d.patente        || '';
+      params.origenId         = d.origenId       || '';
+      params.destinoId        = d.destinoId      || '';
+      params.horaSalida       = d.horaSalida     || '';
+      params.tempSalida       = String(d.tempSalida  || '');
+      params.horaLlegada      = d.horaLlegada    || '';
+      params.tempLlegada      = String(d.tempLlegada || '');
+      params.desvios          = d.desvios        || '';
+      params.observaciones    = d.observaciones  || '';
+      params.sinFotoEvidencia = d.sinFotoEvidencia ? '1' : '0';
+    }
+    return gasCall(params);
+  }
+
+  async function cargarEnvios() {
+    try {
+      document.getElementById('fb-status').textContent = '↻ Cargando…';
+      const res = await gasGet('listar');
+      envios = res.envios || [];
+      document.getElementById('fb-status').textContent = '🟢 Conectado';
+      document.getElementById('fb-status').style.color = '#4caf50';
+    } catch(e) {
+      console.error('Error cargando envíos:', e);
+      envios = [];
+      document.getElementById('fb-status').textContent = '⚠️ Sin conexión';
+      document.getElementById('fb-status').style.color = '#ff9800';
+    }
+    renderTabla();
+    renderEnviosDia();
+  }
+
+  window.guardarEnvio = async function() {
+    console.log('[GUARDAR] función iniciada');
+    // Validar datos de recepción (los de salida vienen de _envioEnCurso)
+    const tempLlegada = document.getElementById('tempLlegada').value;
+    let horaLlegada = document.getElementById('horaLlegada').value;
+
+    if (!tempLlegada) {
+      mostrarToast('Ingresá la temperatura de llegada ⚠️', 'warn');
+      document.getElementById('tempLlegada').focus();
+      return;
+    }
+    // Si no confirmaron hora, tomarla ahora automáticamente
+    if (!horaLlegada) {
+      registrarHoraLlegada();
+      horaLlegada = document.getElementById('horaLlegada').value;
+    }
+
+    // Fuente de datos de salida: _envioEnCurso (si hay) o DOM (si es edición)
+    const ec = window._envioEnCurso;
+    const data = {
+      fecha:        ec ? ec.fecha     : document.getElementById('fecha').value,
+      chofer:       ec ? ec.chofer    : document.getElementById('chofer').value.trim(),
+      patente:      ec ? ec.patente   : document.getElementById('patente').value.toUpperCase().replace(/\s/g,''),
+      origenId:     ec ? ec.origenId  : (getSucOrigen()||['225'])[0],
+      destinoId:    ec ? ec.destinoId : (getSucDestino()||['235'])[0],
+      horaSalida:   ec ? ec.horaSalida : document.getElementById('horaSalida').value,
+      tempSalida:   ec ? ec.tempSalida : document.getElementById('tempSalida').value,
+      horaLlegada:  horaLlegada,
+      tempLlegada:  tempLlegada,
+      observaciones: document.getElementById('observaciones').value,
+      desvios:      document.getElementById('desviosSeleccionados').value,
+      fotoUrl:      window._fotoRecepcionBase64 || fotoBase64 || null,
+      fotoSalidaUrl: (ec && ec.fotoSalidaBase64) || window._fotoSalidaBase64 || null,
+      sinFotoEvidencia: ec ? ec.sinFotoEvidencia : (window._salidaSinFoto || false),
+      fechaCreacion: Date.now()
+    };
+
+    const btn = document.getElementById('btnGuardar');
+    btn.disabled = true;
+    btn.textContent = 'Guardando…';
+
+    try {
+      let res;
+      console.log('[GUARDAR] editandoId:', editandoId, '| data:', data);
+      if (editandoId) {
+        res = await gasPost({ accion: 'editar', id: editandoId, data: data });
+        mostrarToast('Actualizado ✓', 'ok');
+      } else {
+        res = await gasPost({ accion: 'guardar', data: data });
+        mostrarToast('Guardado: ' + JSON.stringify(res), 'ok');
+      }
+      console.log('[GUARDAR] respuesta:', res);
+      if (res && res.error) throw new Error(res.error);
+      await cargarEnvios();
+    } catch(e) {
+      mostrarToast('ERROR: ' + e.message, 'err');
+      console.error(e);
+    }
+
+    window._envioEnCurso = null;
+    window._fotoRecepcionBase64 = null;
+    window._fotoRecepcionFile = null;
+    editandoId = null;
+    // Deshabilitar tab Recepción
+    const tabBtn = document.getElementById('tabRecepcion');
+    if (tabBtn) { tabBtn.style.opacity = '0.4'; tabBtn.style.pointerEvents = 'none'; }
+    switchTab('registro');
+    resetForm();
+    btn.disabled = false;
+    btn.textContent = '✅ Guardar recepción completa';
+  };  // fin guardarEnvio
+
+  window.editarEnvio = function(id) {
+    const e = envios.find(x => x.id === id);
+    if (!e) return;
+    editandoId = id;
+    document.getElementById('fecha').value = e.fecha;
+    document.getElementById('horaSalida').value = e.horaSalida;
+    document.getElementById('tempSalida').value = e.tempSalida;
+    document.getElementById('horaLlegada').value = e.horaLlegada;
+    document.getElementById('tempLlegada').value = e.tempLlegada;
+    document.getElementById('chofer').value = e.chofer;
+    document.getElementById('patente').value = e.patente || '';
+    document.getElementById('observaciones').value = e.observaciones || '';
+    // Restaurar select de desvíos
+    document.getElementById('desviosSeleccionados').value = e.desvios || '';
+    onDesvioChange();
+    // Restaurar origen/destino
+    if (e.origenId && document.getElementById('formOrigen')) document.getElementById('formOrigen').value = e.origenId;
+    if (e.destinoId && document.getElementById('formDestino')) document.getElementById('formDestino').value = e.destinoId;
+    onFormRutaChange();
+    document.getElementById('btnGuardar').textContent = 'Actualizar Envío';
+    document.getElementById('formCard').scrollIntoView({ behavior: 'smooth' });
+    mostrarToast('Editando envío…', 'warn');
+  };
+
+  window.eliminarEnvio = async function(id) {
+    if (!confirm('¿Eliminás este envío?')) return;
+    try {
+      await gasPost({ accion: 'eliminar', id: id });
+      await cargarEnvios();
+      mostrarToast('Envío eliminado', 'warn');
+    } catch(e) {
+      mostrarToast('Error al eliminar: ' + e.message, 'err');
+    }
+  };
+
+  window.exportarExcel = function() {
+    const filtrados = getEnviosFiltrados();
+    if (!filtrados.length) { mostrarToast('No hay datos para exportar', 'warn'); return; }
+
+    const wb = XLSX.utils.book_new();
+    const rows = [
+      ['CONTROL DE ENVÍOS DE CARNE — ' + (localStorage.getItem('sys_empresa') || 'LA ANÓNIMA')],
+      ['Sucursal Origen: 225  →  Destino: 235'],
+      ['Generado:', new Date().toLocaleString('es-AR')],
+      [],
+      ['Fecha', 'Chofer', 'Patente', 'Hora Salida', 'Temp. Salida (°C)', 'Hora Llegada', 'Temp. Llegada (°C)', 'Duración', 'Desvíos', 'Observaciones']
+    ];
+
+    filtrados.forEach(e => {
+      const dur = calcDuracion(e.horaSalida, e.horaLlegada);
+      rows.push([e.fecha, e.chofer, e.patente || '', e.horaSalida, parseFloat(e.tempSalida), e.horaLlegada, parseFloat(e.tempLlegada), dur, formatDesviosLabel(e.desvios), e.observaciones || '']);
+    });
+
+    rows.push([]);
+    rows.push(['TOTALES', '', '', '', '', '', `${filtrados.length} envíos`, '']);
+
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+
+    // Estilos básicos
+    ws['!cols'] = [12, 18, 12, 16, 12, 16, 12, 30].map(w => ({ wch: w }));
+    ws['!merges'] = [
+      { s: { r: 0, c: 0 }, e: { r: 0, c: 7 } },
+      { s: { r: 1, c: 0 }, e: { r: 1, c: 7 } },
+    ];
+
+    XLSX.utils.book_append_sheet(wb, ws, 'Envíos');
+    XLSX.writeFile(wb, `envios_carne_${getFechaFiltro()}.xlsx`);
+    mostrarToast('Excel exportado ✓', 'ok');
+  };
+
+  window.exportarPDF = function() {
+    const { jsPDF } = window.jspdf;
+    const filtrados = getEnviosFiltrados();
+    if (!filtrados.length) { mostrarToast('No hay datos para exportar', 'warn'); return; }
+
+    const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+
+    // Header
+    doc.setFillColor(20, 20, 20);
+    doc.rect(0, 0, 297, 25, 'F');
+    doc.setTextColor(255, 255, 255);
+    doc.setFontSize(16);
+    doc.setFont('helvetica', 'bold');
+    doc.text('CONTROL DE ENVÍOS DE CARNE', 14, 12);
+    doc.setFontSize(10);
+    doc.setFont('helvetica', 'normal');
+    const empNombre = localStorage.getItem('sys_empresa') || 'La Anónima S.A.';
+    const subNombre = localStorage.getItem('sys_nombre') || 'Sistema de Entregas';
+    doc.text(empNombre + ' — ' + subNombre, 14, 20);
+    doc.text(`Generado: ${new Date().toLocaleString('es-AR')}`, 220, 20);
+
+    // Tabla
+    const rows = filtrados.map(e => {
+      const dur = calcDuracion(e.horaSalida, e.horaLlegada);
+      const alertaTemp = (parseFloat(e.tempLlegada) - parseFloat(e.tempSalida)) > 2 ? '⚠️' : '✓';
+      return [e.fecha, e.chofer, e.patente || '', e.horaSalida, `${e.tempSalida}°C`, e.horaLlegada, `${e.tempLlegada}°C`, dur, alertaTemp, formatDesviosLabel(e.desvios), e.observaciones || '-'];
+    });
+
+    doc.autoTable({
+      startY: 30,
+      head: [['Fecha', 'Chofer', 'Patente', 'Salida', 'Temp. Sal.', 'Llegada', 'Temp. Lleg.', 'Duración', 'Estado', 'Desvíos', 'Observaciones']],
+      body: rows,
+      theme: 'grid',
+      styles: { fontSize: 9, cellPadding: 3 },
+      headStyles: { fillColor: [230, 57, 70], textColor: 255, fontStyle: 'bold' },
+      alternateRowStyles: { fillColor: [248, 248, 248] },
+      columnStyles: { 8: { cellWidth: 50 } }
+    });
+
+    // Footer
+    const pageH = doc.internal.pageSize.height;
+    doc.setFontSize(8);
+    doc.setTextColor(150);
+    doc.text(`Total: ${filtrados.length} envíos`, 14, pageH - 8);
+
+    doc.save(`envios_carne_${getFechaFiltro()}.pdf`);
+    mostrarToast('PDF exportado ✓', 'ok');
+  };
+
+  function getEnviosFiltrados() {
+    const desde = document.getElementById('filtroDesde').value;
+    const hasta = document.getElementById('filtroHasta').value;
+    if (!desde && !hasta) return envios;
+    return envios.filter(e => {
+      if (desde && e.fecha < desde) return false;
+      if (hasta && e.fecha > hasta) return false;
+      return true;
+    });
+  }
+
+  function getFechaFiltro() {
+    const d = document.getElementById('filtroDesde').value;
+    const h = document.getElementById('filtroHasta').value;
+    if (d && h) return `${d}_${h}`;
+    if (d) return `desde_${d}`;
+    if (h) return `hasta_${h}`;
+    return new Date().toISOString().slice(0, 10);
+  }
+
+  function calcDuracion(h1, h2) {
+    if (!h1 || !h2) return '-';
+    const [a, b] = [h1, h2].map(h => { const [hh, mm] = h.split(':').map(Number); return hh * 60 + mm; });
+    const diff = b - a;
+    if (diff < 0) return '-';
+    return `${Math.floor(diff / 60)}h ${diff % 60}min`;
+  }
+
+  function renderTabla() {
+    const filtrados = getEnviosFiltrados();
+    const tbody = document.getElementById('tbody');
+    document.getElementById('totalEnvios').textContent = filtrados.length;
+
+    if (!filtrados.length) {
+      tbody.innerHTML = `<tr><td colspan="9" style="text-align:center;padding:32px;color:#888">Sin registros para el período seleccionado</td></tr>`;
+      return;
+    }
+
+    tbody.innerHTML = filtrados.map(e => {
+      const dur = calcDuracion(e.horaSalida, e.horaLlegada);
+      const tempDiff = parseFloat(e.tempLlegada) - parseFloat(e.tempSalida);
+      const alerta = tempDiff > 2;
+      return `
+        <tr>
+          <td>${e.fecha}</td>
+          <td>${e.chofer}</td>
+          <td><span class="patente-badge">${formatPatenteBadge(e.patente)}</span></td>
+          <td><span class="badge badge-out">${e.horaSalida}</span></td>
+          <td><span class="temp ${alerta ? 'temp-warn' : ''}">${e.tempSalida}°C</span></td>
+          <td><span class="badge badge-in">${e.horaLlegada || '—'}</span></td>
+          <td><span class="temp ${alerta ? 'temp-warn' : ''}">${e.tempLlegada}°C</span></td>
+          <td>${dur}</td>
+          <td>${alerta ? '<span class="status warn">⚠️ Revisar</span>' : '<span class="status ok">✓ OK</span>'}</td>
+          <td>${renderDesviosBadges(e.desvios)}</td>
+          <td>
+            <div class="acciones">
+              ${e.fotoSalidaUrl ? `<button class="btn-icon" onclick="verFoto('${e.fotoSalidaUrl}')" title="Ver foto evidencia">📷</button>` : (e.sinFotoEvidencia ? '<span class="sin-foto-badge" title="Sin foto de evidencia">📷 Sin foto</span>' : '')}
+              ${e.fotoUrl ? `<button class="btn-icon" onclick="verFoto('${e.fotoUrl}')" title="Ver foto llegada">🖼️</button>` : ''}
+              <button class="btn-icon edit" onclick="editarEnvio('${e.id}')" title="Editar">✏️</button>
+              <button class="btn-icon del" onclick="eliminarEnvio('${e.id}')" title="Eliminar">🗑️</button>
+            </div>
+          </td>
+        </tr>`;
+    }).join('');
+  }
+
+  window.verFoto = function(url) {
+    document.getElementById('fotoModal').style.display = 'flex';
+    document.getElementById('fotoModalImg').src = url;
+  };
+
+  window.cerrarFoto = function() {
+    document.getElementById('fotoModal').style.display = 'none';
+  };
+
+  function renderEnviosDia() {
+    const card = document.getElementById('enviosDiaCard');
+    const lista = document.getElementById('enviosDiaLista');
+    if (!card || !lista) return;
+    const hoy = new Date().toISOString().slice(0,10);
+    const hoy_envios = envios.filter(function(e) {
+      return e.fecha === hoy && e.horaLlegada; // solo los completos
+    });
+    if (!hoy_envios.length) { card.style.display = 'none'; return; }
+    card.style.display = 'block';
+    lista.innerHTML = hoy_envios.map(function(e) {
+      const oSuc = SUCURSALES[e.origenId] || {};
+      const dSuc = SUCURSALES[e.destinoId] || {};
+      const diffTemp = parseFloat(e.tempLlegada) - parseFloat(e.tempSalida);
+      const alerta = Math.abs(diffTemp) > 2;
+      const durMin = e.horaSalida && e.horaLlegada
+        ? horaAMin(e.horaLlegada) - horaAMin(e.horaSalida) : null;
+      const durStr = durMin !== null ? durMin + ' min' : '—';
+      const desvioHtml = e.desvios
+        ? '<span class="desvio-badge" style="border-color:#ff9800;color:#ff9800;background:rgba(255,152,0,0.08)">' + (DESVIOS_LABELS[e.desvios] || e.desvios) + '</span>'
+        : '';
+      return '<div class="envio-dia-row">' +
+        '<div class="envio-dia-ruta">' +
+          '<span style="background:' + (oSuc.color||'#888') + ';color:#fff;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700">Suc. ' + e.origenId + '</span>' +
+          '<span style="color:#555;padding:0 6px">→</span>' +
+          '<span style="background:' + (dSuc.color||'#888') + ';color:#fff;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700">Suc. ' + e.destinoId + '</span>' +
+        '</div>' +
+        '<div class="envio-dia-datos">' +
+          '<span class="patente-badge" style="font-size:11px">' + formatPatenteBadge(e.patente) + '</span>' +
+          '<span style="color:#aaa;font-size:12px">' + e.chofer + '</span>' +
+          '<span style="color:#aaa;font-size:12px">🕐 ' + e.horaSalida + ' → ' + e.horaLlegada + ' (' + durStr + ')</span>' +
+          '<span class="' + (alerta ? 'temp temp-warn' : 'temp') + '" style="font-size:12px">' + e.tempSalida + '°C → ' + e.tempLlegada + '°C</span>' +
+          (desvioHtml ? desvioHtml : '<span style="color:#4caf50;font-size:11px">✓ Sin desvíos</span>') +
+        '</div>' +
+      '</div>';
+    }).join('');
+  }
+
+  // ── Diagnóstico ─────────────────────────────────────────────────────────
+  window.debugPing = async function() {
+    const out = document.getElementById('debugOutput');
+    out.textContent = 'Probando ping...';
+    try {
+      const r = await fetch(GAS_URL + '?accion=ping', { redirect: 'follow' });
+      const text = await r.text();
+      out.textContent = 'HTTP ' + r.status + '\n' + text;
+    } catch(e) { out.textContent = 'ERROR: ' + e.message; }
+  };
+  window.debugListar = async function() {
+    const out = document.getElementById('debugOutput');
+    out.textContent = 'Listando...';
+    try {
+      const r = await fetch(GAS_URL + '?accion=listar', { redirect: 'follow' });
+      const text = await r.text();
+      out.textContent = 'HTTP ' + r.status + '\n' + text.slice(0, 500);
+    } catch(e) { out.textContent = 'ERROR: ' + e.message; }
+  };
+  window.debugGuardar = async function() {
+    const out = document.getElementById('debugOutput');
+    out.textContent = 'Guardando test...';
+    try {
+      const testData = { accion: 'guardar', data: {
+        fecha: '2026-03-10', chofer: 'TEST', patente: 'AAA000',
+        origenId: '225', destinoId: '235',
+        horaSalida: '10:00', tempSalida: '2',
+        horaLlegada: '10:30', tempLlegada: '3',
+        observaciones: 'prueba diagnostico', desvios: '', sinFotoEvidencia: true
+      }};
+      const payload = encodeURIComponent(JSON.stringify(testData));
+      const r = await fetch(GAS_URL + '?payload=' + payload, { redirect: 'follow' });
+      const text = await r.text();
+      out.textContent = 'HTTP ' + r.status + '\n' + text;
+      if (r.ok) await cargarEnvios();
+    } catch(e) { out.textContent = 'ERROR: ' + e.message; }
+  };
+
+  window.aplicarFiltro = function() { renderTabla(); };
+
+  window.limpiarFiltro = function() {
+    document.getElementById('filtroDesde').value = '';
+    document.getElementById('filtroHasta').value = '';
+    renderTabla();
+  };
+
+  function resetForm() {
+    ['fecha','tempSalida','tempLlegada','chofer','patente','observaciones'].forEach(id => {
+      document.getElementById(id).value = '';
+    });
+    document.getElementById('horaSalida').value = '';
+    document.getElementById('horaLlegada').value = '';
+    document.getElementById('btnSalida').disabled = false;
+    document.getElementById('btnSalida').textContent = 'Registrar hora de salida';
+    document.getElementById('btnSalida').className = 'btn-timestamp';
+    document.getElementById('btnLlegada').disabled = true;
+    document.getElementById('btnLlegada').textContent = 'Registrar hora de llegada';
+    document.getElementById('btnLlegada').className = 'btn-timestamp disabled';
+    document.getElementById('tempLlegada').disabled = false;
+    document.getElementById('fecha').valueAsDate = new Date();
+    fotoBase64 = null;
+    window._fotoFile = null;
+    document.getElementById('fotoPreview').style.display = 'none';
+    document.getElementById('fotoNombre').textContent = '';
+    editandoId = null;
+    document.getElementById('btnGuardar').textContent = 'Registrar Envío';
+    document.getElementById('desviosSeleccionados').value = '';
+    onDesvioChange();
+    window._fotoSalidaBase64 = null;
+    window._fotoSalidaFile = null;
+    window._salidaSinFoto = false;
+    const thumb = document.getElementById('thumbSalida');
+    if (thumb) { thumb.style.display = 'none'; thumb.src = ''; }
+    const indicador = document.getElementById('fotoIndicadorSalida');
+    if (indicador) indicador.style.display = 'flex';
+  }
+
+  // Patente argentina: auto-formatea mientras escribe
+  window.formatearPatente = function(input) {
+    let v = input.value.replace(/[^A-Za-z0-9]/g, '').toUpperCase().slice(0, 7);
+    // Detectar formato: Mercosur (AAA000) o viejo (AA000AA)
+    if (/^[A-Z]{3}\d{0,3}$/.test(v)) {
+      // Mercosur: AAA 000
+      if (v.length > 3) v = v.slice(0,3) + ' ' + v.slice(3);
+    } else if (/^[A-Z]{2}\d{0,3}/.test(v)) {
+      // Viejo: AA 000 AA
+      if (v.length > 5) v = v.slice(0,2) + ' ' + v.slice(2,5) + ' ' + v.slice(5);
+      else if (v.length > 2) v = v.slice(0,2) + ' ' + v.slice(2);
+    }
+    input.value = v;
+    document.getElementById('patenteError').style.display = 'none';
+  };
+
+  window.validarPatente = function(input) {
+    const v = input.value.replace(/\s/g,'').toUpperCase();
+    const ok = /^[A-Z]{3}\d{3}$/.test(v) || /^[A-Z]{2}\d{3}[A-Z]{2}$/.test(v);
+    document.getElementById('patenteError').style.display = (v && !ok) ? 'block' : 'none';
+  };
+
+  function formatPatenteBadge(p) {
+    if (!p) return '—';
+    const v = p.replace(/\s/g,'').toUpperCase();
+    if (/^[A-Z]{3}\d{3}$/.test(v)) return v.slice(0,3) + ' ' + v.slice(3);       // AAA 000
+    if (/^[A-Z]{2}\d{3}[A-Z]{2}$/.test(v)) return v.slice(0,2) + ' ' + v.slice(2,5) + ' ' + v.slice(5); // AA 000 AA
+    return v;
+  }
+
+  const DESVIOS_LABELS = {
+    temp_alta_llegada:   '🌡️ Temp. alta al llegar',
+    temp_fuera_rango:    '🌡️ Temp. fuera de rango',
+    cadena_frio_rota:    '❄️ Cadena de frío comprometida',
+    producto_congelado:  '🧊 Producto parcialmente congelado',
+    color_anormal:       '🥩 Color anormal',
+    olor_anormal:        '🥩 Olor anormal',
+    textura_anormal:     '🥩 Textura anormal',
+    producto_danado:     '🥩 Producto dañado físicamente',
+    fecha_vencimiento:   '📅 Problema vencimiento',
+    embalaje_roto:       '📦 Embalaje roto',
+    embalaje_sucio:      '📦 Embalaje sucio',
+    faltante_bultos:     '📦 Faltante de bultos',
+    exceso_bultos:       '📦 Exceso de bultos',
+    producto_incorrecto: '📦 Producto incorrecto',
+    rechazo_total:       '🚫 Rechazo total',
+    rechazo_parcial:     '🚫 Rechazo parcial',
+    demora_entrega:      '⏱ Demora en entrega',
+    otro:                '📝 Otro'
+  };
+
+  const DESVIO_COLORES = {
+    temp_alta_llegada: '#e63946', temp_fuera_rango: '#e63946', cadena_frio_rota: '#2196f3',
+    producto_congelado: '#2196f3', color_anormal: '#ff9800', olor_anormal: '#ff9800',
+    textura_anormal: '#ff9800', producto_danado: '#ff9800', fecha_vencimiento: '#ff9800',
+    embalaje_roto: '#ff9800', embalaje_sucio: '#888', faltante_bultos: '#ff9800',
+    exceso_bultos: '#888', producto_incorrecto: '#ff9800', rechazo_total: '#e63946',
+    rechazo_parcial: '#ff9800', demora_entrega: '#888', otro: '#888'
+  };
+
+  window.onDesvioChange = function() {
+    const val = document.getElementById('desviosSeleccionados').value;
+    const label = document.getElementById('desvioDetalleLabel');
+    const wrap = document.getElementById('desvioDetalleWrap');
+    const icono = document.getElementById('desvioIcono');
+    if (!val) {
+      if (label) label.textContent = '';
+      if (wrap) wrap.style.opacity = '0.5';
+      if (icono) icono.innerHTML = '';
+    } else {
+      const txt = DESVIOS_LABELS[val] || val;
+      const color = DESVIO_COLORES[val] || '#ff9800';
+      if (label) label.textContent = '— ' + txt;
+      if (wrap) { wrap.style.opacity = '1'; wrap.style.borderColor = color; }
+      if (icono) icono.innerHTML = '<span style="color:' + color + ';font-size:13px;font-weight:700">' + txt + '</span>';
+      // Si es "otro" hacer foco en observaciones
+      if (val === 'otro') setTimeout(function(){ document.getElementById('observaciones').focus(); }, 100);
+    }
+  };
+
+  function formatDesviosLabel(desvios) {
+    if (!desvios) return '—';
+    return DESVIOS_LABELS[desvios] || desvios;
+  }
+
+  function renderDesviosBadges(desvios) {
+    if (!desvios) return '<span style="color:#555;font-size:12px">—</span>';
+    const color = DESVIO_COLORES[desvios] || '#ff9800';
+    const txt = DESVIOS_LABELS[desvios] || desvios;
+    return '<span class="desvio-badge" style="background:rgba(255,152,0,0.1);border-color:' + color + ';color:' + color + '">' + txt + '</span>';
+  }
+
+  window.checkHabilitarSalida = function() {
+    const temp = document.getElementById('tempSalida').value;
+    const btn = document.getElementById('btnSalida');
+    const yaRegistrado = document.getElementById('horaSalida').value !== '';
+    if (temp && !yaRegistrado) {
+      btn.disabled = false;
+      btn.classList.remove('disabled');
+    }
+  };
+
+  window.checkHabilitarLlegada = function() {
+    const temp = document.getElementById('tempLlegada').value;
+    const btn = document.getElementById('btnLlegada');
+    const yaRegistrado = document.getElementById('horaLlegada').value !== '';
+    if (temp && !yaRegistrado) {
+      btn.disabled = false;
+      btn.classList.remove('disabled');
+    }
+  };
+
+  // Datos del envío en curso (pasados entre tabs)
+  window._envioEnCurso = null;
+
+  window.registrarHoraSalida = function() {
+    const temp = document.getElementById('tempSalida').value;
+    if (!temp) { mostrarToast('Ingresá la temperatura primero ⚠️', 'warn'); return; }
+    const camposReq = ['fecha','chofer','patente'];
+    for (const c of camposReq) {
+      if (!document.getElementById(c).value.trim()) {
+        mostrarToast('Completá todos los campos obligatorios ⚠️', 'warn');
+        document.getElementById(c).focus();
+        return;
+      }
+    }
+    const ahora = new Date();
+    const hora = ahora.toTimeString().slice(0,5);
+    // Guardar datos del envío en curso
+    const oId = document.getElementById('formOrigen').value;
+    const dId = document.getElementById('formDestino').value;
+    window._envioEnCurso = {
+      fecha:     document.getElementById('fecha').value,
+      chofer:    document.getElementById('chofer').value.trim(),
+      patente:   document.getElementById('patente').value.toUpperCase().replace(/\s/g,''),
+      origenId:  oId,
+      destinoId: dId,
+      horaSalida: hora,
+      tempSalida: temp,
+      fotoSalidaBase64: fotoBase64 || null,
+      fotoSalidaFile:   window._fotoFile || null,
+      sinFotoEvidencia: !fotoBase64
+    };
+    window._fotoSalidaBase64 = fotoBase64 || null;
+    window._salidaSinFoto = !fotoBase64;
+
+    // Mostrar resumen en tab Recepción
+    const oSuc = SUCURSALES[oId] || {};
+    const dSuc = SUCURSALES[dId] || {};
+    const resumen = document.getElementById('recepcionResumenBody');
+    if (resumen) {
+      resumen.innerHTML =
+        '<div class="resumen-dato"><div class="resumen-label">Fecha</div><div class="resumen-val">' + window._envioEnCurso.fecha + '</div></div>' +
+        '<div class="resumen-dato"><div class="resumen-label">Chofer</div><div class="resumen-val">' + window._envioEnCurso.chofer + '</div></div>' +
+        '<div class="resumen-dato"><div class="resumen-label">Patente</div><div class="resumen-val"><span class="patente-badge">' + formatPatenteBadge(window._envioEnCurso.patente) + '</span></div></div>' +
+        '<div class="resumen-dato"><div class="resumen-label">Origen</div><div class="resumen-val"><span style="background:' + (oSuc.color||'#888') + ';color:#fff;padding:2px 8px;border-radius:4px;font-size:12px;font-weight:700">Suc. ' + oId + '</span></div></div>' +
+        '<div class="resumen-dato"><div class="resumen-label">Destino</div><div class="resumen-val"><span style="background:' + (dSuc.color||'#888') + ';color:#fff;padding:2px 8px;border-radius:4px;font-size:12px;font-weight:700">Suc. ' + dId + '</span></div></div>' +
+        '<div class="resumen-dato"><div class="resumen-label">Hora salida</div><div class="resumen-val" style="color:var(--accent);font-weight:700;font-size:16px">' + hora + '</div></div>' +
+        '<div class="resumen-dato"><div class="resumen-label">Temp. salida</div><div class="resumen-val" style="font-size:16px;font-weight:700">' + temp + '°C</div></div>' +
+        (window._fotoSalidaBase64 ? '<div class="resumen-dato"><div class="resumen-label">Foto salida</div><div class="resumen-val"><img src="' + window._fotoSalidaBase64 + '" style="width:56px;height:56px;object-fit:cover;border-radius:6px;border:2px solid var(--ok)"></div></div>' : '<div class="resumen-dato"><div class="resumen-label">Foto salida</div><div class="resumen-val sin-foto-badge">📷 Sin foto</div></div>');
+    }
+
+    // Habilitar y abrir tab Recepción
+    const tabBtn = document.getElementById('tabRecepcion');
+    if (tabBtn) { tabBtn.style.opacity = '1'; tabBtn.style.pointerEvents = 'auto'; }
+    switchTab('recepcion');
+
+    // Resetear formulario de salida para próximo envío
+    setTimeout(function() { resetFormSalida(); }, 300);
+
+    mostrarToast('Salida registrada — completá la recepción en destino 📥', 'ok');
+
+    // Mapa: resetear y redibujar con la ruta del envío en curso
+    if (mapa) {
+      borrarRuta();
+      mapa.remove(); mapa = null; marcadorCamion = null;
+    }
+    // Si el tab mapa está activo, redibujar; si no, se dibuja al abrirlo
+    const tabMapaEl = document.getElementById('tab-mapa');
+    if (tabMapaEl && tabMapaEl.classList.contains('active')) {
+      setTimeout(function() { window.initMapa(); }, 200);
+    }
+    actualizarTracker();
+  };
+
+  function resetFormSalida() {
+    document.getElementById('fecha').valueAsDate = new Date();
+    document.getElementById('chofer').value = '';
+    document.getElementById('patente').value = '';
+    document.getElementById('tempSalida').value = '';
+    document.getElementById('horaSalida').value = '';
+    fotoBase64 = null; window._fotoFile = null;
+    document.getElementById('fotoPreview').style.display = 'none';
+    document.getElementById('fotoEvidenciaPreview').style.display = 'none';
+    document.getElementById('fotoIndicadorSalida').style.display = 'flex';
+    document.getElementById('fotoInput').value = '';
+    const btnS = document.getElementById('btnSalida');
+    btnS.textContent = '⏱ Confirmar salida';
+    btnS.disabled = true; btnS.classList.add('disabled'); btnS.classList.remove('registered');
+    poblarSelectsFormulario();
+  }
+
+  window.onFotoRecepcion = function(input) {
+    if (!input.files || !input.files[0]) return;
+    const file = input.files[0];
+    const reader = new FileReader();
+    reader.onload = function(e) {
+      window._fotoRecepcionBase64 = e.target.result;
+      window._fotoRecepcionFile = file;
+      const prev = document.getElementById('fotoRecepcionPreview');
+      const img = document.getElementById('fotoRecepcionImg');
+      const nom = document.getElementById('fotoRecepcionNombre');
+      if (prev) prev.style.display = 'flex';
+      if (img) img.src = e.target.result;
+      if (nom) nom.textContent = file.name;
+    };
+    reader.readAsDataURL(file);
+  };
+
+  window.registrarHoraLlegada = function() {
+    const temp = document.getElementById('tempLlegada').value;
+    if (!temp) { mostrarToast('Ingresá la temperatura de llegada primero ⚠️', 'warn'); return; }
+    const ahora = new Date();
+    const hora = ahora.toTimeString().slice(0,5);
+    document.getElementById('horaLlegada').value = hora;
+    const btn = document.getElementById('btnLlegada');
+    btn.textContent = '✓ Llegada registrada ' + hora;
+    btn.disabled = true;
+    btn.classList.add('registered');
+    mostrarToast('Hora de llegada registrada: ' + hora, 'ok');
+    // Actualizar tracker (mostrará estado "llegó")
+    actualizarTracker();
+    // Al llegar: completar tramo recorrido y desvanecer todo
+    if (rutaLayerRecorrido && rutaCoords.length) {
+      rutaLayerRecorrido.setLatLngs(rutaCoords); // ruta completa en rojo
+      if (rutaLayerPendiente) rutaLayerPendiente.setStyle({ opacity: 0 });
+      flechasLayers.forEach(function(m) { m.remove(); });
+      flechasLayers = [];
+      // Desvanecer gradualmente
+      let op = 0.95;
+      const fadeOut = setInterval(function() {
+        op -= 0.04;
+        if (op <= 0.2) {
+          if (rutaLayerRecorrido) rutaLayerRecorrido.setStyle({ opacity: 0.2, color: '#4caf50' });
+          clearInterval(fadeOut);
+        } else {
+          if (rutaLayerRecorrido) rutaLayerRecorrido.setStyle({ opacity: op });
+        }
+      }, 50);
+    }
+  };
+
+  // ── ADMIN ────────────────────────────────────────────────
+  let editandoSucId = null;
+
+  const ADMIN_PASS_DEFAULT = 'admin123';
+
+  async function sha256(str) {
+    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+    return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2,'0')).join('');
+  }
+
+  async function getAdminHash() {
+    const saved = localStorage.getItem('admin_pass_hash');
+    if (saved) return saved;
+    const h = await sha256(ADMIN_PASS_DEFAULT);
+    return h;
+  }
+
+  function poblarSelectsFormulario() {
+    const ids = Object.keys(SUCURSALES);
+    const selO = document.getElementById('formOrigen');
+    const selD = document.getElementById('formDestino');
+    if (!selO || !selD) return;
+    const activeO = localStorage.getItem('suc_origen_active') || (Object.entries(SUCURSALES).find(([,s])=>s.rol==='origen')||[''])[0];
+    const activeD = localStorage.getItem('suc_destino_active') || (Object.entries(SUCURSALES).find(([,s])=>s.rol==='destino')||[''])[0];
+    selO.innerHTML = ids.map(function(id) {
+      const s = SUCURSALES[id];
+      return '<option value="' + id + '"' + (id === activeO ? ' selected' : '') + '>Suc. ' + id + ' — ' + (s.direccion||s.dir||'') + '</option>';
+    }).join('');
+    selD.innerHTML = ids.map(function(id) {
+      const s = SUCURSALES[id];
+      return '<option value="' + id + '"' + (id === activeD ? ' selected' : '') + '>Suc. ' + id + ' — ' + (s.direccion||s.dir||'') + '</option>';
+    }).join('');
+    onFormRutaChange();
+  }
+
+  window.onFormRutaChange = function() {
+    const selO = document.getElementById('formOrigen');
+    const selD = document.getElementById('formDestino');
+    if (!selO || !selD) return;
+    const oId = selO.value;
+    const dId = selD.value;
+    const oSuc = SUCURSALES[oId];
+    const dSuc = SUCURSALES[dId];
+    // Actualizar labels salida/llegada
+    const lSal = document.getElementById('labelSalida');
+    const lLleg = document.getElementById('labelLlegada');
+    if (lSal && oSuc) lSal.innerHTML = '<span style="background:' + oSuc.color + ';color:#fff;padding:2px 8px;border-radius:3px;font-size:11px;margin-right:6px">Suc. ' + oId + '</span> Salida — ' + oSuc.direccion||oSuc.label||'';
+    if (lLleg && dSuc) lLleg.innerHTML = '<span style="background:' + dSuc.color + ';color:#fff;padding:2px 8px;border-radius:3px;font-size:11px;margin-right:6px">Suc. ' + dId + '</span> Llegada — ' + dSuc.direccion||dSuc.label||'';
+    // Alerta si mismo origen y destino
+    if (oId === dId) {
+      mostrarToast('Origen y destino no pueden ser la misma sucursal ⚠️', 'warn');
+    }
+  };
+
+    function poblarSelectsRuta() {
+    const ids = Object.keys(SUCURSALES);
+    const selO = document.getElementById('adminOrigenSel');
+    const selD = document.getElementById('adminDestinoSel');
+    if (!selO || !selD) return;
+    const activeO = localStorage.getItem('suc_origen_active') || (getSucOrigen()||[''])[0];
+    const activeD = localStorage.getItem('suc_destino_active') || (getSucDestino()||[''])[0];
+    selO.innerHTML = ids.map(function(id) {
+      const s = SUCURSALES[id];
+      const sel = id === activeO ? ' selected' : '';
+      return '<option value="' + id + '"' + sel + '>Suc. ' + id + ' — ' + (s.direccion||s.dir||'') + '</option>';
+    }).join('');
+    selD.innerHTML = ids.map(function(id) {
+      const s = SUCURSALES[id];
+      const sel = id === activeD ? ' selected' : '';
+      return '<option value="' + id + '"' + sel + '>Suc. ' + id + ' — ' + (s.direccion||s.dir||'') + '</option>';
+    }).join('');
+    actualizarRutaActivaPreview();
+  }
+
+  window.actualizarRutaActiva = function() {
+    const selO = document.getElementById('adminOrigenSel');
+    const selD = document.getElementById('adminDestinoSel');
+    if (!selO || !selD) return;
+    const o = selO.value;
+    const d = selD.value;
+    if (o === d) {
+      mostrarToast('Origen y destino no pueden ser la misma sucursal ⚠️', 'warn');
+      return;
+    }
+    localStorage.setItem('suc_origen_active', o);
+    localStorage.setItem('suc_destino_active', d);
+    actualizarRutaBadge();
+    actualizarRutaActivaPreview();
+    // Resetear mapa para que recalcule con nueva ruta
+    if (mapa) { mapa.remove(); mapa = null; marcadorCamion = null; rutaLayerPendiente = null; rutaLayerRecorrido = null; rutaLayer = null; rutaCoords = []; }
+    mostrarToast('Ruta actualizada ✓', 'ok');
+  };
+
+  function actualizarRutaActivaPreview() {
+    const preview = document.getElementById('rutaActivaPreview');
+    if (!preview) return;
+    const o = getSucOrigen();
+    const d = getSucDestino();
+    if (!o || !d) { preview.innerHTML = '<span style="color:#666">—</span>'; return; }
+    const [oId, oSuc] = o;
+    const [dId, dSuc] = d;
+    preview.innerHTML =
+      '<span style="display:inline-flex;align-items:center;gap:6px">' +
+        '<span style="background:' + oSuc.color + ';color:#fff;padding:3px 10px;border-radius:4px;font-weight:700;font-size:12px">Suc. ' + oId + '</span>' +
+        '<span style="color:#888;font-size:13px">' + oSuc.direccion||oSuc.label||'' + '</span>' +
+      '</span>' +
+      '<span style="color:#555;font-size:18px;padding:0 4px">→</span>' +
+      '<span style="display:inline-flex;align-items:center;gap:6px">' +
+        '<span style="background:' + dSuc.color + ';color:#fff;padding:3px 10px;border-radius:4px;font-weight:700;font-size:12px">Suc. ' + dId + '</span>' +
+        '<span style="color:#888;font-size:13px">' + dSuc.direccion||dSuc.label||'' + '</span>' +
+      '</span>';
+  }
+
+  window.cerrarAdmin = function() {
+    // Volver al tab anterior o a "nuevo"
+    const tabs = ['nuevo','historial','mapa'];
+    const activo = tabs.find(function(t) {
+      return document.getElementById('tab-' + t) &&
+             document.getElementById('tab-' + t).classList.contains('active');
+    });
+    switchTab(activo || 'nuevo');
+  };
+
+  window.abrirAdmin = function() {
+    // Mostrar modal de contraseña
+    const modal = document.getElementById('modalAdmin');
+    modal.style.display = 'flex';
+    setTimeout(() => document.getElementById('adminPassInput').focus(), 100);
+  };
+
+  window.cerrarModalAdmin = function(e) {
+    if (e && e.target !== document.getElementById('modalAdmin')) return;
+    document.getElementById('modalAdmin').style.display = 'none';
+    document.getElementById('adminPassInput').value = '';
+    document.getElementById('adminPassError').style.display = 'none';
+  };
+  // sobrecarga sin argumento para botón cancelar
+  const _cerrarModalAdmin = window.cerrarModalAdmin;
+  window.cerrarModalAdmin = function(e) {
+    document.getElementById('modalAdmin').style.display = 'none';
+    document.getElementById('adminPassInput').value = '';
+    document.getElementById('adminPassError').style.display = 'none';
+  };
+
+  window.verificarAdmin = async function() {
+    const pass = document.getElementById('adminPassInput').value;
+    if (!pass) return;
+    const inputHash = await sha256(pass);
+    const correctHash = await getAdminHash();
+    if (inputHash !== correctHash) {
+      document.getElementById('adminPassError').style.display = 'block';
+      document.getElementById('adminPassInput').value = '';
+      document.getElementById('adminPassInput').focus();
+      return;
+    }
+    // Correcto — abrir admin
+    document.getElementById('modalAdmin').style.display = 'none';
+    document.getElementById('adminPassInput').value = '';
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+    document.getElementById('tabBtnAdmin').classList.add('active');
+    document.getElementById('tab-admin').classList.add('active');
+    renderAdminSucList();
+    poblarSelectsRuta();
+    document.getElementById('adminEmpresa').value  = localStorage.getItem('sys_empresa') || 'LA ANÓNIMA';
+    document.getElementById('adminSysNombre').value = localStorage.getItem('sys_nombre')  || 'Sistema de Entregas';
+    document.getElementById('adminColor').value     = localStorage.getItem('sys_color')   || '#e63946';
+    actualizarPreviewHeader();
+    // Cargar contraseña actual (vacía, no mostramos el hash)
+    document.getElementById('adminPassActual').value = '';
+    document.getElementById('adminPassNueva').value = '';
+    document.getElementById('adminPassConfirm').value = '';
+  };
+
+  window.elegirColor = function(c) {
+    document.getElementById('adminColor').value = c;
+    actualizarPreviewHeader();
+  };
+
+  function actualizarPreviewHeader() {
+    const empresa = (document.getElementById('adminEmpresa').value || 'LA ANÓNIMA').trim();
+    const sub = document.getElementById('adminSysNombre').value || 'Sistema de Entregas';
+    const color = document.getElementById('adminColor').value || '#e63946';
+    const partes = empresa.split(' ');
+    const ultima = partes.pop();
+    const resto = partes.join(' ');
+    const prevLogo = document.getElementById('prevLogo');
+    const prevAccent = document.getElementById('prevAccent');
+    const prevSub = document.getElementById('prevSub');
+    if (prevLogo) prevLogo.innerHTML = (resto ? resto + ' ' : '') + '<span id="prevAccent" style="color:' + color + '">' + ultima + '</span>';
+    if (prevSub) prevSub.textContent = sub;
+  }
+
+  window.guardarNombreSistema = function() {
+    const empresa = document.getElementById('adminEmpresa').value.trim();
+    const nombre  = document.getElementById('adminSysNombre').value.trim();
+    const color   = document.getElementById('adminColor').value;
+    if (!empresa && !nombre) { mostrarToast('Ingresá al menos un campo ⚠️', 'warn'); return; }
+    if (empresa) localStorage.setItem('sys_empresa', empresa);
+    if (nombre)  localStorage.setItem('sys_nombre', nombre);
+    if (color)   localStorage.setItem('sys_color', color);
+    actualizarRutaBadge();
+    // Actualizar también encabezados de reportes
+    mostrarToast('Identidad actualizada ✓', 'ok');
+  };
+
+  window.cambiarContrasena = async function() {
+    const actual  = document.getElementById('adminPassActual').value;
+    const nueva   = document.getElementById('adminPassNueva').value;
+    const confirm = document.getElementById('adminPassConfirm').value;
+    if (!actual || !nueva || !confirm) { mostrarToast('Completá todos los campos ⚠️', 'warn'); return; }
+    if (nueva !== confirm) { mostrarToast('Las contraseñas nuevas no coinciden ⚠️', 'warn'); return; }
+    if (nueva.length < 4) { mostrarToast('Mínimo 4 caracteres ⚠️', 'warn'); return; }
+    const actualHash  = await sha256(actual);
+    const correctHash = await getAdminHash();
+    if (actualHash !== correctHash) { mostrarToast('Contraseña actual incorrecta ❌', 'err'); return; }
+    const nuevoHash = await sha256(nueva);
+    localStorage.setItem('admin_pass_hash', nuevoHash);
+    document.getElementById('adminPassActual').value = '';
+    document.getElementById('adminPassNueva').value = '';
+    document.getElementById('adminPassConfirm').value = '';
+    mostrarToast('Contraseña actualizada ✓', 'ok');
+  };
+
+  function renderAdminSucList() {
+    const container = document.getElementById('adminSucList');
+    const ids = Object.keys(SUCURSALES);
+    if (!ids.length) {
+      container.innerHTML = '<p style="color:#666;font-size:13px">Sin sucursales configuradas.</p>';
+      return;
+    }
+    container.innerHTML = ids.map(id => {
+      const s = SUCURSALES[id];
+      const rolLabel = s.rol === 'origen' ? '🟥 Origen' : s.rol === 'destino' ? '🟦 Destino' : '🟣 Ambos';
+      return `<div class="admin-suc-row">
+        <div class="admin-suc-dot" style="background:${s.color}"></div>
+        <div class="admin-suc-info">
+          <span class="admin-suc-id">Suc. ${id}</span>
+          <span class="admin-suc-dir">${s.direccion || s.label}</span>
+          <span class="admin-suc-coords">${s.lat.toFixed(5)}, ${s.lng.toFixed(5)}</span>
+        </div>
+        <span class="admin-suc-rol">${rolLabel}</span>
+        <div class="admin-suc-acciones">
+          <button class="btn-icon" onclick="abrirFormSucursal('${id}')" title="Editar">✏️</button>
+          <button class="btn-icon del" onclick="eliminarSucursal('${id}')" title="Eliminar">🗑️</button>
+        </div>
+      </div>`;
+    }).join('');
+  }
+
+  window.abrirFormSucursal = function(id) {
+    editandoSucId = id;
+    const form = document.getElementById('adminSucForm');
+    form.style.display = 'block';
+    form.scrollIntoView({ behavior: 'smooth' });
+    document.getElementById('adminSucFormTitle').textContent = id ? 'Editar Sucursal ' + id : 'Nueva Sucursal';
+    if (id && SUCURSALES[id]) {
+      const s = SUCURSALES[id];
+      document.getElementById('aSucId').value = id;
+      document.getElementById('aSucId').disabled = true;
+      document.getElementById('aSucDir').value = s.direccion || '';
+      document.getElementById('aSucLat').value = s.lat;
+      document.getElementById('aSucLng').value = s.lng;
+      document.getElementById('aSucColor').value = s.color;
+      document.getElementById('aSucRol').value = s.rol || 'origen';
+    } else {
+      document.getElementById('aSucId').value = '';
+      document.getElementById('aSucId').disabled = false;
+      document.getElementById('aSucDir').value = '';
+      document.getElementById('aSucLat').value = '';
+      document.getElementById('aSucLng').value = '';
+      document.getElementById('aSucColor').value = '#e63946';
+      document.getElementById('aSucRol').value = 'origen';
+    }
+  };
+
+  window.cerrarFormSucursal = function() {
+    document.getElementById('adminSucForm').style.display = 'none';
+    editandoSucId = null;
+  };
+
+  window.guardarSucursal = function() {
+    const id  = document.getElementById('aSucId').value.trim();
+    const dir = document.getElementById('aSucDir').value.trim();
+    const lat = parseFloat(document.getElementById('aSucLat').value);
+    const lng = parseFloat(document.getElementById('aSucLng').value);
+    const color = document.getElementById('aSucColor').value;
+    const rol = document.getElementById('aSucRol').value;
+    if (!id || !dir || isNaN(lat) || isNaN(lng)) {
+      mostrarToast('Completá todos los campos obligatorios ⚠️', 'warn'); return;
+    }
+    if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+      mostrarToast('Coordenadas inválidas ⚠️', 'warn'); return;
+    }
+    SUCURSALES[id] = { lat, lng, label: 'Suc. ' + id + ' — ' + dir, direccion: dir, color, rol };
+    guardarConfigSucursales(SUCURSALES);
+    cerrarFormSucursal();
+    renderAdminSucList();
+    actualizarRutaBadge();
+    // Reset mapa para que recargue con nuevas sucursales
+    if (mapa) { mapa.remove(); mapa = null; marcadorCamion = null; rutaCoords = []; }
+    mostrarToast('Sucursal guardada ✓', 'ok');
+  };
+
+  window.eliminarSucursal = function(id) {
+    if (!confirm('¿Eliminás la sucursal ' + id + '?')) return;
+    delete SUCURSALES[id];
+    guardarConfigSucursales(SUCURSALES);
+    renderAdminSucList();
+    actualizarRutaBadge();
+    if (mapa) { mapa.remove(); mapa = null; marcadorCamion = null; rutaCoords = []; }
+    mostrarToast('Sucursal eliminada', 'warn');
+  };
+
+  window.centrarEnCamion = function() {
+    if (!mapa) { mostrarToast('Abrí el mapa primero', 'warn'); return; }
+    if (marcadorCamion) {
+      mapa.setView(marcadorCamion.getLatLng(), 16, { animate: true, duration: 0.8 });
+    } else {
+      // Centrar en el origen si no hay camión activo
+      const [,origenC] = getSucOrigen() || ['225', SUCURSALES_DEFAULT['225']];
+      mapa.setView([origenC.lat, origenC.lng], 15, { animate: true });
+      mostrarToast('Sin camión en tránsito — centrando en Suc. 225', 'warn');
+    }
+  };
+
+  function mostrarToast(msg, tipo) {
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.className = 'toast show ' + tipo;
+    setTimeout(() => t.className = 'toast', 3000);
+  }
+
+  // Foto handler
+  document.addEventListener('DOMContentLoaded', () => {
+    document.getElementById('fecha').valueAsDate = new Date();
+    actualizarRutaBadge();
+    poblarSelectsFormulario();
+    cargarEnvios();
+    // Live preview en admin
+    ['adminEmpresa','adminSysNombre','adminColor'].forEach(function(id) {
+      const el = document.getElementById(id);
+      if (el) el.addEventListener('input', actualizarPreviewHeader);
+    });
+    document.getElementById('tempLlegada').disabled = false;
+    document.getElementById('btnLlegada').disabled = true;
+    document.getElementById('btnLlegada').classList.add('disabled');
+    document.getElementById('btnSalida').disabled = true;
+    document.getElementById('btnSalida').classList.add('disabled');
+
+    document.getElementById('fotoInput').addEventListener('change', function(e) {
+      const file = e.target.files[0];
+      if (!file) return;
+      window._fotoFile = file;
+      document.getElementById('fotoNombre').textContent = file.name;
+      const reader = new FileReader();
+      reader.onload = ev => {
+        fotoBase64 = ev.target.result;
+        const prev = document.getElementById('fotoPreview');
+        prev.src = fotoBase64;
+        prev.style.display = 'block';
+        // Mostrar panel de preview y ocultar indicador
+        document.getElementById('fotoIndicadorSalida').style.display = 'none';
+        document.getElementById('fotoEvidenciaPreview').style.display = 'flex';
+        // Habilitar botón salida si también hay temperatura
+        window.checkHabilitarSalida();
+      };
+      reader.readAsDataURL(file);
+    });
+
+    // Tab navegación
+    window.switchTab = function(target) {
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+      const btn = document.querySelector('.tab-btn[data-tab="' + target + '"]');
+      if (btn) btn.classList.add('active');
+      const tabEl = document.getElementById('tab-' + target);
+      if (tabEl) tabEl.classList.add('active');
+      if (target === 'mapa') {
+        setTimeout(function() { window.initMapa(); if (mapa) mapa.invalidateSize(); }, 100);
+      }
+    };
+
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const target = btn.dataset.tab;
+        if (btn.style.pointerEvents === 'none') return;
+        switchTab(target);
+      });
+    });
+  });
+</script>
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<style>
+  :root {
+    --bg: #0f0f0f;
+    --surface: #1a1a1a;
+    --surface2: #242424;
+    --border: #2e2e2e;
+    --accent: #e63946;
+    --accent2: #2196f3;
+    --text: #f0f0f0;
+    --text2: #888;
+    --ok: #4caf50;
+    --warn: #ff9800;
+    --radius: 10px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'DM Sans', sans-serif;
+    font-size: 14px;
+    min-height: 100vh;
+  }
+
+  /* HEADER */
+  .header {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 0 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 64px;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    gap: 12px;
+  }
+  .header-left { display: flex; align-items: baseline; gap: 10px; }
+  .header-right { display: flex; align-items: center; gap: 12px; }
+  .logo {
+    font-family: 'Bebas Neue', sans-serif;
+    font-size: 22px;
+    letter-spacing: 2px;
+    color: var(--text);
+    white-space: nowrap;
+  }
+  .logo span { color: var(--accent); }
+  .sys-name {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text2);
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    white-space: nowrap;
+  }
+  .fb-status { font-size: 12px; color: var(--text2); white-space: nowrap; }
+  .btn-admin {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text2);
+    padding: 6px 14px;
+    border-radius: 6px;
+    font-family: 'DM Sans', sans-serif;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+    white-space: nowrap;
+  }
+  .btn-admin:hover { border-color: var(--accent); color: var(--accent); }
+
+  /* MODAL ADMIN PASSWORD */
+  .modal-admin-box {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 32px 28px;
+    width: 100%;
+    max-width: 360px;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.6);
+  }
+  .modal-admin-icon { text-align: center; font-size: 36px; margin-bottom: 8px; }
+  .modal-admin-title {
+    font-family: 'Bebas Neue', sans-serif;
+    font-size: 22px;
+    letter-spacing: 2px;
+    text-align: center;
+    margin-bottom: 4px;
+  }
+  .admin-pass-input {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    padding: 12px 14px;
+    font-family: 'DM Sans', sans-serif;
+    font-size: 16px;
+    width: 100%;
+    text-align: center;
+    letter-spacing: 4px;
+    transition: border 0.2s;
+  }
+  .admin-pass-input:focus { outline: none; border-color: var(--accent); }
+
+  /* ADMIN SUCURSALES */
+  .admin-suc-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 14px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-bottom: 8px;
+  }
+  .admin-suc-dot { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
+  .admin-suc-info { flex: 1; display: flex; flex-wrap: wrap; gap: 4px 16px; align-items: baseline; }
+  .admin-suc-id { font-family: 'Bebas Neue', sans-serif; font-size: 16px; letter-spacing: 1px; }
+  .admin-suc-dir { font-size: 13px; color: var(--text2); }
+  .admin-suc-coords { font-size: 11px; color: #555; font-family: monospace; }
+  .admin-suc-rol { font-size: 11px; font-weight: 600; white-space: nowrap; }
+  .admin-suc-acciones { display: flex; gap: 4px; }
+  .ruta-badge {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    padding: 4px 14px;
+    font-size: 13px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .ruta-badge .dot { width: 8px; height: 8px; border-radius: 50%; }
+  .dot-out { background: var(--accent); }
+  .dot-in { background: var(--accent2); }
+
+  /* TABS */
+  .tabs {
+    display: flex;
+    gap: 2px;
+    padding: 16px 20px 0;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+  }
+  .tab-btn {
+    background: none;
+    border: none;
+    border-bottom: 3px solid transparent;
+    color: var(--text2);
+    padding: 10px 18px;
+    font-family: 'DM Sans', sans-serif;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+    white-space: nowrap;
+  }
+  .tab-btn:hover { color: var(--text); }
+  .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .tab-content { display: none; padding: 20px; }
+  .tab-content.active { display: block; }
+
+  /* CARDS */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px;
+    margin-bottom: 16px;
+  }
+  .card-title {
+    font-family: 'Bebas Neue', sans-serif;
+    font-size: 16px;
+    letter-spacing: 1.5px;
+    color: var(--text2);
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .card-title::before { content: ''; width: 3px; height: 16px; background: var(--accent); border-radius: 2px; display: inline-block; }
+
+  /* FORM */
+  .form-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 12px;
+  }
+  .form-group { display: flex; flex-direction: column; gap: 6px; }
+  .form-group label { font-size: 11px; font-weight: 600; color: var(--text2); text-transform: uppercase; letter-spacing: 0.8px; }
+  .form-group input, .form-group textarea {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    padding: 10px 12px;
+    font-family: 'DM Sans', sans-serif;
+    font-size: 14px;
+    transition: border 0.2s;
+    width: 100%;
+  }
+  .form-group input:focus, .form-group textarea:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  .form-group textarea { resize: vertical; min-height: 70px; }
+  .form-separator {
+    grid-column: 1 / -1;
+    height: 1px;
+    background: var(--border);
+    margin: 4px 0;
+  }
+  .form-separator-label {
+    grid-column: 1 / -1;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text2);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .form-separator-label::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+
+  /* FOTO */
+  .foto-zone {
+    grid-column: 1 / -1;
+    border: 2px dashed var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    cursor: pointer;
+    transition: border-color 0.2s;
+  }
+  .foto-zone:hover { border-color: var(--accent); }
+  .foto-zone input[type=file] { display: none; }
+  .foto-btn {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 8px 16px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-family: 'DM Sans', sans-serif;
+    font-size: 13px;
+    white-space: nowrap;
+    transition: background 0.2s;
+  }
+  .foto-btn:hover { background: var(--border); }
+  #fotoPreview { width: 60px; height: 60px; object-fit: cover; border-radius: 6px; display: none; }
+  #fotoNombre { font-size: 12px; color: var(--text2); }
+
+  /* BUTTONS */
+  .btn-primary {
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    padding: 12px 28px;
+    font-family: 'DM Sans', sans-serif;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity 0.2s, transform 0.1s;
+    width: 100%;
+    margin-top: 8px;
+  }
+  .btn-primary:hover { opacity: 0.9; }
+  .btn-primary:active { transform: scale(0.98); }
+  .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-secondary {
+    background: var(--surface2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 20px;
+    font-family: 'DM Sans', sans-serif;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.2s;
+  }
+  .btn-secondary:hover { background: var(--border); }
+
+  /* FILTROS */
+  .filtro-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+  .filtro-row .form-group { min-width: 140px; }
+  .export-btns { display: flex; gap: 8px; margin-left: auto; }
+  .btn-export {
+    padding: 10px 18px;
+    border-radius: 8px;
+    font-family: 'DM Sans', sans-serif;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    border: none;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    transition: opacity 0.2s;
+  }
+  .btn-export:hover { opacity: 0.85; }
+  .btn-export.excel { background: #1d7044; color: #fff; }
+  .btn-export.pdf { background: var(--accent); color: #fff; }
+
+  /* TABLA */
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; }
+  thead th {
+    background: var(--surface2);
+    padding: 10px 12px;
+    text-align: left;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: var(--text2);
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  tbody tr { border-bottom: 1px solid var(--border); transition: background 0.15s; }
+  tbody tr:hover { background: var(--surface2); }
+  tbody td { padding: 10px 12px; vertical-align: middle; }
+
+  .badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .badge-out { background: rgba(230,57,70,0.15); color: #e63946; }
+  .badge-in { background: rgba(33,150,243,0.15); color: #2196f3; }
+  .temp { font-weight: 600; }
+  .temp-warn { color: var(--warn); }
+  .status { font-size: 12px; font-weight: 600; padding: 3px 8px; border-radius: 4px; }
+  .status.ok { background: rgba(76,175,80,0.15); color: var(--ok); }
+  .status.warn { background: rgba(255,152,0,0.15); color: var(--warn); }
+
+  .acciones { display: flex; gap: 6px; }
+  .btn-icon {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 15px;
+    padding: 4px;
+    border-radius: 4px;
+    transition: background 0.15s;
+  }
+  .btn-icon:hover { background: var(--border); }
+
+  /* TIMESTAMP BUTTONS */
+  .timestamp-group { gap: 6px !important; }
+  .hora-display {
+    background: var(--surface2) !important;
+    border: 1px solid var(--border) !important;
+    color: var(--accent) !important;
+    font-weight: 700 !important;
+    font-size: 18px !important;
+    text-align: center;
+    letter-spacing: 2px;
+    cursor: default !important;
+  }
+  .hora-display::placeholder { color: #444; font-size: 14px; font-weight: 400; letter-spacing: 0; }
+  .btn-timestamp {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 10px 14px;
+    border-radius: 6px;
+    font-family: 'DM Sans', sans-serif;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+  }
+  .btn-timestamp:not(.disabled):not([disabled]):hover {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+    transform: scale(1.01);
+  }
+  .btn-timestamp.disabled, .btn-timestamp[disabled] {
+    opacity: 0.35;
+    cursor: not-allowed;
+  }
+  .btn-timestamp.registered {
+    background: rgba(76,175,80,0.1);
+    border-color: var(--ok);
+    color: var(--ok);
+    cursor: default;
+  }
+
+  /* STATS */
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+  .stat-card {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+    text-align: center;
+  }
+  .stat-val { font-family: 'Bebas Neue', sans-serif; font-size: 28px; color: var(--accent); }
+  .stat-label { font-size: 11px; color: var(--text2); text-transform: uppercase; letter-spacing: 0.5px; margin-top: 2px; }
+
+  /* MAPA */
+  #mapa { height: 400px; border-radius: var(--radius); overflow: hidden; }
+
+  /* TRACKER */
+  .tracker-card { border-color: #2a2a2a; }
+  .tracker-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px 20px;
+    font-size: 13px;
+  }
+  .tracker-row b { font-weight: 700; }
+  .tracker-badge {
+    padding: 4px 12px;
+    border-radius: 20px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+  }
+  .tracker-barra-wrap {
+    position: relative;
+    background: var(--surface2);
+    border-radius: 4px;
+    height: 8px;
+    margin-top: 12px;
+    overflow: visible;
+  }
+  .tracker-barra-fill {
+    height: 100%;
+    border-radius: 4px;
+    transition: width 1s ease;
+    min-width: 4px;
+  }
+  .tracker-barra-pct {
+    position: absolute;
+    right: 0;
+    top: -18px;
+    font-size: 11px;
+    color: var(--text2);
+    font-weight: 600;
+  }
+
+  @keyframes pulso {
+    from { transform: scale(1); }
+    to   { transform: scale(1.2); }
+  }
+
+  /* MODAL FOTO */
+  .modal {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.85);
+    z-index: 999;
+    align-items: center;
+    justify-content: center;
+  }
+  .modal img { max-width: 90vw; max-height: 85vh; border-radius: 8px; }
+  .modal-close {
+    position: absolute;
+    top: 20px; right: 24px;
+    font-size: 28px;
+    color: #fff;
+    cursor: pointer;
+    background: none;
+    border: none;
+  }
+
+  /* TOAST */
+  .toast {
+    position: fixed;
+    bottom: 24px;
+    left: 50%;
+    transform: translateX(-50%) translateY(80px);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 12px 24px;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 500;
+    z-index: 9999;
+    transition: transform 0.3s ease;
+    white-space: nowrap;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.4);
+  }
+  .toast.show { transform: translateX(-50%) translateY(0); }
+  .toast.ok { border-color: var(--ok); color: var(--ok); }
+  .toast.warn { border-color: var(--warn); color: var(--warn); }
+  .toast.err { border-color: var(--accent); color: var(--accent); }
+
+  /* SETUP FIREBASE */
+  .setup-banner {
+    background: rgba(230,57,70,0.08);
+    border: 1px solid rgba(230,57,70,0.25);
+    border-radius: 8px;
+    padding: 14px 18px;
+    font-size: 13px;
+    margin-bottom: 16px;
+    line-height: 1.6;
+  }
+  .setup-banner code {
+    background: var(--surface2);
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 12px;
+    color: #f8d7da;
+  }
+
+  .sin-foto-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    background: rgba(255,152,0,0.1);
+    border: 1px solid rgba(255,152,0,0.35);
+    color: #ff9800;
+    padding: 2px 7px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  /* DESVÍOS SELECT */
+  .desvio-select-wrap {
+    position: relative;
+  }
+  .desvio-select {
+    width: 100%;
+    background: var(--surface2);
+    border: 1.5px solid var(--border);
+    color: var(--text);
+    padding: 11px 14px;
+    border-radius: 8px;
+    font-family: 'DM Sans', sans-serif;
+    font-size: 14px;
+    cursor: pointer;
+    appearance: none;
+    -webkit-appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%23888' stroke-width='2' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 14px center;
+    padding-right: 36px;
+    transition: border-color 0.2s;
+  }
+  .desvio-select:focus { outline: none; border-color: #ff9800; }
+  .desvio-select option { background: #1a1a1a; color: #f0f0f0; }
+  .desvio-select optgroup { color: #888; font-size: 11px; }
+  .desvio-icono {
+    margin-top: 8px;
+    min-height: 20px;
+  }
+  #desvioDetalleWrap {
+    transition: opacity 0.2s, border-color 0.2s;
+  }
+  .desvio-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    white-space: nowrap;
+    border: 1px solid;
+    margin: 1px 2px;
+  }
+
+  /* PATENTE BADGE */
+  .patente-badge {
+    display: inline-block;
+    background: #111;
+    border: 2px solid #444;
+    color: #fff;
+    padding: 3px 10px;
+    border-radius: 5px;
+    font-family: 'Bebas Neue', monospace;
+    font-size: 14px;
+    letter-spacing: 3px;
+    box-shadow: inset 0 1px 3px rgba(255,255,255,0.05);
+  }
+
+  /* FOTO EVIDENCIA OBLIGATORIA */
+  .foto-evidencia-required {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    background: rgba(230,57,70,0.07);
+    border: 1.5px dashed rgba(230,57,70,0.35);
+    border-radius: 8px;
+    padding: 12px 16px;
+    font-size: 13px;
+    color: #e63946;
+    font-weight: 500;
+  }
+  .foto-evidencia-required .foto-btn {
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  #fotoEvidenciaPreview {
+    background: rgba(76,175,80,0.05);
+    border: 1.5px solid rgba(76,175,80,0.3);
+    border-radius: 8px;
+    padding: 10px 14px;
+  }
+
+  /* BOTÓN CENTRAR MAPA */
+  .btn-centrar {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 7px 16px;
+    border-radius: 8px;
+    font-family: 'DM Sans', sans-serif;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+  }
+  .btn-centrar:hover {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+    transform: scale(1.03);
+  }
+  .btn-centrar:active { transform: scale(0.97); }
+
+  .envio-dia-row {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 14px;
+    margin-bottom: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    background: var(--surface2);
+  }
+  .envio-dia-row:last-child { margin-bottom: 0; }
+  .envio-dia-ruta { display: flex; align-items: center; }
+  .envio-dia-datos {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+  }
+
+  .resumen-dato {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 14px;
+  }
+  .resumen-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: #666;
+    margin-bottom: 4px;
+  }
+  .resumen-val { font-size: 13px; font-weight: 600; color: var(--text); }
+
+  .btn-cerrar-admin {
+    background: transparent;
+    border: 1.5px solid var(--border);
+    color: #888;
+    padding: 7px 16px;
+    border-radius: 8px;
+    font-family: 'DM Sans', sans-serif;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s;
+    letter-spacing: 0.3px;
+  }
+  .btn-cerrar-admin:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+    background: rgba(230,57,70,0.06);
+  }
+
+  .header-preview {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 16px;
+    display: flex;
+    align-items: baseline;
+    gap: 0;
+    min-height: 48px;
+    align-items: center;
+  }
+  .color-preset {
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    border: 2px solid transparent;
+    cursor: pointer;
+    transition: transform 0.15s, border-color 0.15s;
+    flex-shrink: 0;
+  }
+  .color-preset:hover { transform: scale(1.2); border-color: #fff; }
+
+  @media (max-width: 600px) {
+    .header { padding: 0 12px; }
+    .ruta-badge { display: none; }
+    .sys-name { display: none; }
+    .tab-btn { padding: 10px 12px; font-size: 12px; }
+    .form-grid { grid-template-columns: 1fr 1fr; }
+    .export-btns { width: 100%; }
+    .btn-export { flex: 1; justify-content: center; }
+  }
+</style>
+</head>
+<body>
+
+<header class="header">
+  <div class="header-left">
+    <div class="logo" id="logoEmpresa">LA <span>ANÓNIMA</span></div>
+    <div class="sys-name" id="sysname">Sistema de Entregas</div>
+  </div>
+
+  <div class="header-right">
+    <div class="fb-status" id="fb-status">Conectando…</div>
+    <button class="btn-admin" onclick="abrirAdmin()">⚙️ Admin</button>
+  </div>
+</header>
+
+<nav class="tabs">
+  <button class="tab-btn active" data-tab="registro">🚚 Salida</button>
+  <button class="tab-btn" data-tab="recepcion" id="tabRecepcion" style="opacity:0.4;pointer-events:none">📥 Recepción</button>
+  <button class="tab-btn" data-tab="historial">📊 Historial</button>
+  <button class="tab-btn" data-tab="mapa">🗺️ Mapa</button>
+  <button class="tab-btn" data-tab="admin" id="tabBtnAdmin" style="margin-left:auto">⚙️ Admin</button>
+</nav>
+
+<!-- TAB: REGISTRO -->
+<div id="tab-registro" class="tab-content active">
+
+<div class="card" id="formCard">
+    <div class="card-title">🚚 Registrar Salida</div>
+    <div class="form-grid">
+      <div class="form-group">
+        <label>Fecha *</label>
+        <input type="date" id="fecha">
+      </div>
+      <div class="form-group">
+        <label>Chofer *</label>
+        <input type="text" id="chofer" placeholder="Nombre del chofer">
+      </div>
+      <div class="form-group">
+        <label>Patente *</label>
+        <input type="text" id="patente" placeholder="AAA 000 o AA 000 AA"
+          style="text-transform:uppercase;letter-spacing:3px;font-family:'Bebas Neue',monospace;font-size:17px"
+          maxlength="9" oninput="formatearPatente(this)" onblur="validarPatente(this)">
+        <div id="patenteError" style="display:none;color:var(--accent);font-size:11px;margin-top:4px">
+          Formato inválido — usá AAA 000 (Mercosur) o AA 000 AA (viejo)
+        </div>
+      </div>
+
+      <div class="form-separator-label" style="grid-column:1/-1">📍 Ruta del envío</div>
+      <div class="form-group">
+        <label><span class="dot dot-out" style="display:inline-block;margin-right:4px"></span>Sucursal origen (envía)</label>
+        <select id="formOrigen" class="desvio-select" onchange="onFormRutaChange()"></select>
+      </div>
+      <div class="form-group">
+        <label><span class="dot dot-in" style="display:inline-block;margin-right:4px"></span>Sucursal destino (recibe)</label>
+        <select id="formDestino" class="desvio-select" onchange="onFormRutaChange()"></select>
+      </div>
+
+      <div class="form-separator-label" id="labelSalida">🟥 Datos de salida</div>
+      <div class="form-group">
+        <label>Temp. Salida (°C) *</label>
+        <input type="number" id="tempSalida" placeholder="ej: 2.5" step="0.1" oninput="checkHabilitarSalida()">
+      </div>
+
+      <div class="form-group" style="grid-column:1/-1">
+        <label>📷 Foto Evidencia Salida <span style="color:#888;font-size:11px;font-weight:400">(recomendada)</span></label>
+        <div id="fotoIndicadorSalida" class="foto-evidencia-required">
+          <span>📷 Se recomienda adjuntar foto como evidencia</span>
+          <button type="button" class="foto-btn" onclick="document.getElementById('fotoInput').click()">Tomar / Adjuntar foto</button>
+        </div>
+        <div id="fotoEvidenciaPreview" style="display:none;align-items:center;gap:12px;margin-top:8px">
+          <img id="fotoPreview" style="width:72px;height:72px;object-fit:cover;border-radius:6px;border:2px solid var(--ok)" alt="evidencia">
+          <div>
+            <div style="color:var(--ok);font-weight:600;font-size:13px">✓ Foto lista</div>
+            <div id="fotoNombre" style="color:#888;font-size:12px"></div>
+            <button type="button" style="background:none;border:none;color:#888;font-size:11px;cursor:pointer;padding:0;margin-top:2px" onclick="document.getElementById('fotoInput').click()">Cambiar foto</button>
+          </div>
+          <img id="thumbSalida" style="display:none;width:48px;height:48px;object-fit:cover;border-radius:4px;border:2px solid var(--accent);margin-left:auto" alt="thumb salida">
+        </div>
+        <input type="file" id="fotoInput" accept="image/*" capture="environment" style="display:none">
+      </div>
+
+      <div class="form-group timestamp-group" style="grid-column:1/-1">
+        <label>Hora de Salida</label>
+        <input type="text" id="horaSalida" readonly placeholder="—" class="hora-display">
+        <button type="button" id="btnSalida" class="btn-timestamp disabled" onclick="registrarHoraSalida()" disabled>⏱ Confirmar salida</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- TAB: RECEPCIÓN -->
+<div id="tab-recepcion" class="tab-content">
+  <div class="card" id="recepcionResumen" style="border-color:var(--accent2);margin-bottom:16px">
+    <div class="card-title" style="color:var(--accent2)">📦 Envío en tránsito</div>
+    <div id="recepcionResumenBody" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;font-size:13px"></div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">📥 Registrar Recepción</div>
+    <div class="form-grid">
+      <div class="form-separator-label" id="labelLlegada">🟦 Datos de llegada</div>
+
+      <div class="form-group">
+        <label>Temp. Llegada (°C) *</label>
+        <input type="number" id="tempLlegada" placeholder="ej: 3.1" step="0.1" oninput="checkHabilitarLlegada()">
+      </div>
+      <div class="form-group timestamp-group">
+        <label>Hora de Llegada</label>
+        <input type="text" id="horaLlegada" readonly placeholder="—" class="hora-display">
+        <button type="button" id="btnLlegada" class="btn-timestamp" onclick="registrarHoraLlegada()">⏱ Confirmar llegada</button>
+      </div>
+
+      <div class="form-group" style="grid-column:1/-1">
+        <label>📷 Foto de recepción <span style="color:#888;font-size:11px;font-weight:400">(opcional)</span></label>
+        <div id="fotoRecepcionPreview" style="display:none;align-items:center;gap:12px;margin-top:8px">
+          <img id="fotoRecepcionImg" style="width:72px;height:72px;object-fit:cover;border-radius:6px;border:2px solid var(--ok)" alt="recepcion">
+          <div>
+            <div style="color:var(--ok);font-weight:600;font-size:13px">✓ Foto lista</div>
+            <div id="fotoRecepcionNombre" style="color:#888;font-size:12px"></div>
+          </div>
+        </div>
+        <button type="button" class="foto-btn" style="margin-top:8px" onclick="document.getElementById('fotoRecepcionInput').click()">📷 Tomar / Adjuntar foto</button>
+        <input type="file" id="fotoRecepcionInput" accept="image/*" capture="environment" style="display:none" onchange="onFotoRecepcion(this)">
+      </div>
+
+      <div class="form-separator-label" style="grid-column:1/-1">⚠️ Desvíos y Observaciones</div>
+
+      <div class="form-group" style="grid-column:1/-1">
+        <label>¿Hubo algún problema con la carne? <span style="color:#888;font-size:11px;font-weight:400">(completar en destino)</span></label>
+        <div class="desvio-select-wrap">
+          <select id="desviosSeleccionados" class="desvio-select" onchange="onDesvioChange()">
+            <option value="">— Sin desvíos —</option>
+            <optgroup label="🌡️ Temperatura">
+              <option value="temp_alta_llegada">Temperatura alta al llegar</option>
+              <option value="temp_fuera_rango">Temperatura fuera de rango en tránsito</option>
+              <option value="cadena_frio_rota">Cadena de frío comprometida</option>
+              <option value="producto_congelado">Producto llegó parcialmente congelado</option>
+            </optgroup>
+            <optgroup label="🥩 Calidad del producto">
+              <option value="color_anormal">Color anormal de la carne</option>
+              <option value="olor_anormal">Olor anormal / putrefacción</option>
+              <option value="textura_anormal">Textura o consistencia anormal</option>
+              <option value="producto_danado">Producto golpeado o dañado físicamente</option>
+              <option value="fecha_vencimiento">Problema con fecha de vencimiento</option>
+            </optgroup>
+            <optgroup label="📦 Embalaje y entrega">
+              <option value="embalaje_roto">Embalaje roto o abierto</option>
+              <option value="embalaje_sucio">Embalaje sucio o contaminado</option>
+              <option value="faltante_bultos">Faltante de bultos</option>
+              <option value="exceso_bultos">Exceso de bultos / error de carga</option>
+              <option value="producto_incorrecto">Producto incorrecto recibido</option>
+            </optgroup>
+            <optgroup label="🚫 Recepción">
+              <option value="rechazo_total">Rechazo total del lote</option>
+              <option value="rechazo_parcial">Rechazo parcial del lote</option>
+              <option value="demora_entrega">Demora excesiva en la entrega</option>
+            </optgroup>
+            <option value="otro">📝 Otro (especificar en observaciones)</option>
+          </select>
+          <div id="desvioIcono" class="desvio-icono"></div>
+        </div>
+      </div>
+
+      <div class="form-group" style="grid-column:1/-1" id="desvioDetalleWrap">
+        <label>Observaciones <span id="desvioDetalleLabel" style="color:#888;font-weight:400"></span></label>
+        <textarea id="observaciones" placeholder="Novedades, incidentes, detalle del desvío…" style="min-height:80px"></textarea>
+      </div>
+    </div>
+
+    <button class="btn-primary" id="btnGuardar" onclick="alert('CLICK OK - temp:' + document.getElementById('tempLlegada').value + ' hora:' + document.getElementById('horaLlegada').value); guardarEnvio();">✅ Guardar recepción completa</button>
+  </div>
+
+  <!-- Envíos del día completados -->
+  <div class="card" id="enviosDiaCard" style="margin-top:16px;display:none">
+    <div class="card-title">✅ Envíos registrados hoy</div>
+    <div id="enviosDiaLista"></div>
+  </div>
+</div>
+
+<!-- TAB: HISTORIAL -->
+<div id="tab-historial" class="tab-content">
+  <div class="stats-grid">
+    <div class="stat-card">
+      <div class="stat-val" id="totalEnvios">0</div>
+      <div class="stat-label">Envíos</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Filtrar por período</div>
+    <div class="filtro-row">
+      <div class="form-group">
+        <label>Desde</label>
+        <input type="date" id="filtroDesde">
+      </div>
+      <div class="form-group">
+        <label>Hasta</label>
+        <input type="date" id="filtroHasta">
+      </div>
+      <div style="display:flex;gap:8px;align-items:flex-end">
+        <button class="btn-secondary" onclick="aplicarFiltro()">Filtrar</button>
+        <button class="btn-secondary" onclick="limpiarFiltro()">Ver todo</button>
+      </div>
+      <div class="export-btns">
+        <button class="btn-export excel" onclick="exportarExcel()">📊 Excel</button>
+        <button class="btn-export pdf" onclick="exportarPDF()">📄 PDF</button>
+      </div>
+    </div>
+
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Fecha</th>
+            <th>Chofer</th>
+            <th>Patente</th>
+            <th>Salida</th>
+            <th>Temp. Sal.</th>
+            <th>Llegada</th>
+            <th>Temp. Lleg.</th>
+            <th>Duración</th>
+            <th>Estado</th>
+            <th>Desvíos</th>
+            <th>Acciones</th>
+          </tr>
+        </thead>
+        <tbody id="tbody">
+          <tr><td colspan="9" style="text-align:center;padding:32px;color:#888">Cargando…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- TAB: MAPA -->
+<div id="tab-mapa" class="tab-content">
+
+  <!-- Panel tracker -->
+  <div class="card tracker-card">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+      <div class="card-title" style="margin-bottom:0">🚛 Tracker en vivo — 30 km/h promedio</div>
+      <button id="btnCentrarMapa" class="btn-centrar" onclick="centrarEnCamion()" title="Centrar mapa en el camión">
+        🎯 Centrar
+      </button>
+    </div>
+    <div id="trackerPanel" style="color:#666;font-size:13px">Abrí esta pestaña durante un envío activo para ver el tracker.</div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Ruta — Suc. 225 → Suc. 235</div>
+    <p id="mapaStatus" style="font-size:13px;color:#888;margin-bottom:14px">Cargando ruta real por calles de Neuquén…</p>
+    <div id="mapa"></div>
+  </div>
+</div>
+
+<!-- TAB: ADMIN -->
+<div id="tab-admin" class="tab-content">
+
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+    <span style="color:#888;font-size:13px">⚙️ Panel de administración</span>
+    <button class="btn-cerrar-admin" onclick="cerrarAdmin()" title="Cerrar Admin">✕ Cerrar Admin</button>
+  </div>
+
+  <div class="card">
+    <div class="card-title">🔑 Seguridad</div>
+    <p style="font-size:13px;color:#888;margin-bottom:16px">Contraseña por defecto: <code style="background:var(--surface2);padding:2px 6px;border-radius:3px">admin123</code> — cambiala ahora.</p>
+    <div class="form-grid">
+      <div class="form-group">
+        <label>Contraseña actual</label>
+        <input type="password" id="adminPassActual" placeholder="••••••••">
+      </div>
+      <div class="form-group">
+        <label>Nueva contraseña</label>
+        <input type="password" id="adminPassNueva" placeholder="••••••••">
+      </div>
+      <div class="form-group">
+        <label>Confirmar nueva</label>
+        <input type="password" id="adminPassConfirm" placeholder="••••••••">
+      </div>
+      <div class="form-group" style="align-self:flex-end">
+        <button class="btn-primary" style="margin:0" onclick="cambiarContrasena()">Cambiar contraseña</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">🏷️ Identidad del Sistema</div>
+    <p style="font-size:13px;color:#888;margin-bottom:16px">Personalizá cómo aparece el sistema en el header y los reportes.</p>
+    <div class="form-grid">
+      <div class="form-group">
+        <label>Nombre de la empresa</label>
+        <input type="text" id="adminEmpresa" placeholder="ej: LA ANÓNIMA" style="font-family:'Bebas Neue',sans-serif;font-size:18px;letter-spacing:2px">
+        <div style="font-size:11px;color:#555;margin-top:4px">La última palabra se resalta con el color de acento</div>
+      </div>
+      <div class="form-group">
+        <label>Subtítulo del sistema</label>
+        <input type="text" id="adminSysNombre" placeholder="ej: Sistema de Entregas de Carne">
+      </div>
+      <div class="form-group">
+        <label>Color de acento</label>
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:4px">
+          <input type="color" id="adminColor" value="#e63946" style="height:40px;width:60px;padding:3px 4px;border-radius:6px;border:1px solid var(--border);background:var(--surface2);cursor:pointer">
+          <div style="display:flex;gap:6px;flex-wrap:wrap" id="colorPresets">
+            <button class="color-preset" style="background:#e63946" onclick="elegirColor('#e63946')" title="Rojo"></button>
+            <button class="color-preset" style="background:#2196f3" onclick="elegirColor('#2196f3')" title="Azul"></button>
+            <button class="color-preset" style="background:#4caf50" onclick="elegirColor('#4caf50')" title="Verde"></button>
+            <button class="color-preset" style="background:#ff9800" onclick="elegirColor('#ff9800')" title="Naranja"></button>
+            <button class="color-preset" style="background:#9c27b0" onclick="elegirColor('#9c27b0')" title="Violeta"></button>
+            <button class="color-preset" style="background:#00bcd4" onclick="elegirColor('#00bcd4')" title="Cyan"></button>
+            <button class="color-preset" style="background:#f5c518" onclick="elegirColor('#f5c518')" title="Amarillo"></button>
+          </div>
+        </div>
+      </div>
+      <div class="form-group" style="align-self:flex-end">
+        <div id="headerPreview" class="header-preview">
+          <span id="prevLogo" style="font-family:'Bebas Neue',sans-serif;font-size:18px;letter-spacing:2px">LA <span id="prevAccent" style="color:#e63946">ANÓNIMA</span></span>
+          <span id="prevSub" style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:1.5px;margin-left:8px">Sistema de Entregas</span>
+        </div>
+      </div>
+    </div>
+    <button class="btn-primary" style="width:auto;padding:10px 24px;margin-top:4px" onclick="guardarNombreSistema()">Guardar identidad</button>
+  </div>
+
+  <div class="card">
+    <div class="card-title">🔀 Ruta activa</div>
+    <p style="font-size:13px;color:#888;margin-bottom:16px">Seleccioná qué sucursal envía y cuál recibe hoy. Afecta el mapa, el tracker y los nuevos registros.</p>
+    <div class="form-grid" style="grid-template-columns:1fr 1fr;gap:16px">
+      <div class="form-group" style="margin:0">
+        <label><span class="dot dot-out" style="display:inline-block;margin-right:4px"></span>Sucursal origen (envía)</label>
+        <select id="adminOrigenSel" class="desvio-select" onchange="actualizarRutaActiva()">
+        </select>
+      </div>
+      <div class="form-group" style="margin:0">
+        <label><span class="dot dot-in" style="display:inline-block;margin-right:4px"></span>Sucursal destino (recibe)</label>
+        <select id="adminDestinoSel" class="desvio-select" onchange="actualizarRutaActiva()">
+        </select>
+      </div>
+    </div>
+    <div id="rutaActivaPreview" style="margin-top:14px;padding:10px 14px;background:var(--surface2);border-radius:8px;border:1px solid var(--border);font-size:13px;display:flex;gap:12px;align-items:center;flex-wrap:wrap"></div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">🏪 Sucursales configuradas</div>
+    <p style="font-size:13px;color:#888;margin-bottom:16px">Definí cuáles sucursales envían (origen) y cuáles reciben (destino). El mapa y los reportes se actualizan automáticamente.</p>
+    <div id="adminSucList"></div>
+    <button class="btn-secondary" style="margin-top:12px" onclick="abrirFormSucursal(null)">+ Agregar sucursal</button>
+  </div>
+
+  <!-- Form edición sucursal -->
+  <div class="card" id="adminSucForm" style="display:none;border-color:var(--accent)">
+    <div class="card-title" id="adminSucFormTitle">Nueva Sucursal</div>
+    <div class="form-grid">
+      <div class="form-group">
+        <label>Número / ID *</label>
+        <input type="text" id="aSucId" placeholder="ej: 245">
+      </div>
+      <div class="form-group">
+        <label>Dirección *</label>
+        <input type="text" id="aSucDir" placeholder="ej: Av. Argentina 1200">
+      </div>
+      <div class="form-group">
+        <label>Latitud *</label>
+        <input type="number" id="aSucLat" placeholder="-38.9460" step="0.000001">
+      </div>
+      <div class="form-group">
+        <label>Longitud *</label>
+        <input type="number" id="aSucLng" placeholder="-68.0583" step="0.000001">
+      </div>
+      <div class="form-group">
+        <label>Color en mapa</label>
+        <input type="color" id="aSucColor" value="#e63946" style="height:40px;padding:4px 6px">
+      </div>
+      <div class="form-group">
+        <label>Rol</label>
+        <select id="aSucRol" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:10px 12px;border-radius:6px;font-family:'DM Sans',sans-serif;font-size:14px">
+          <option value="origen">Origen (envía)</option>
+          <option value="destino">Destino (recibe)</option>
+          <option value="ambos">Ambos</option>
+        </select>
+      </div>
+      <div class="form-group" style="grid-column:1/-1">
+        <label style="color:#888;font-size:11px">💡 TIP: Para obtener coordenadas exactas, buscá la dirección en <a href="https://www.openstreetmap.org" target="_blank" style="color:var(--accent)">openstreetmap.org</a>, hacé clic derecho en el punto y copiá lat/lng.</label>
+      </div>
+    </div>
+    <div style="display:flex;gap:10px;margin-top:8px">
+      <button class="btn-primary" style="width:auto;padding:10px 24px" onclick="guardarSucursal()">Guardar sucursal</button>
+      <button class="btn-secondary" onclick="cerrarFormSucursal()">Cancelar</button>
+    </div>
+  </div>
+
+</div>
+
+<!-- MODAL CONTRASEÑA ADMIN -->
+<div class="modal" id="modalAdmin" onclick="cerrarModalAdmin(event)">
+  <div class="modal-admin-box" onclick="event.stopPropagation()">
+    <div class="modal-admin-icon">🔒</div>
+    <div class="modal-admin-title">Acceso Admin</div>
+    <p style="font-size:13px;color:#888;margin-bottom:18px;text-align:center">Ingresá la contraseña para continuar</p>
+    <input type="password" id="adminPassInput" class="admin-pass-input" placeholder="Contraseña"
+      onkeydown="if(event.key==='Enter') verificarAdmin()"
+      oninput="document.getElementById('adminPassError').style.display='none'">
+    <div id="adminPassError" style="display:none;color:var(--accent);font-size:12px;margin-top:6px;text-align:center">
+      ❌ Contraseña incorrecta
+    </div>
+    <div style="display:flex;gap:10px;margin-top:16px">
+      <button class="btn-primary" style="margin:0" onclick="verificarAdmin()">Ingresar</button>
+      <button class="btn-secondary" onclick="cerrarModalAdmin()">Cancelar</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL FOTO -->
+<div class="modal" id="fotoModal" onclick="cerrarFoto()">
+  <button class="modal-close" onclick="cerrarFoto()">✕</button>
+  <img id="fotoModalImg" alt="foto envío">
+</div>
+
+<div class="toast" id="toast"></div>
+
+</body>
+</html>
