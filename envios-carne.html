@@ -96,6 +96,8 @@
   let marcadorCamion = null;
   let trackerInterval = null;
   const VEL_KMH = 30;
+  const rutasMulti = {};
+  const COLORES_RUTA = ['#e63946','#2196f3','#ff9800','#9c27b0','#00bcd4','#4caf50'];
 
   // Calcular distancia entre dos puntos [lat,lng] en km (Haversine)
   function haversine(a, b) {
@@ -141,108 +143,97 @@
   }
 
   function actualizarTracker() {
-    if (!rutaCoords.length) return;
-
-    // Buscar el envio activo: tiene horaSalida pero no horaLlegada
+    const panel = document.getElementById('trackerPanel');
     const ahora = new Date();
     const minAhora = ahora.getHours()*60 + ahora.getMinutes();
+    const rutasKeys = Object.keys(rutasMulti);
 
-    // Buscar en el formulario si hay un envio en curso
-    const hSalida = document.getElementById('horaSalida') ? document.getElementById('horaSalida').value : '';
-    const hLlegada = document.getElementById('horaLlegada') ? document.getElementById('horaLlegada').value : '';
-
-    const hoy = new Date().toISOString().slice(0,10);
-    let envioActivo = null;
-    // Prioridad: envío en curso (entre salida y recepción)
-    if (window._envioEnCurso && window._envioEnCurso.horaSalida) {
-      envioActivo = { horaSalida: window._envioEnCurso.horaSalida, horaLlegada: hLlegada || null };
-    } else if (hSalida && !hLlegada) {
-      envioActivo = { horaSalida: hSalida, horaLlegada: null };
-    } else if (envios && envios.length) {
-      envioActivo = envios.find(function(e) {
-        return e.fecha === hoy && e.horaSalida && !e.horaLlegada;
-      }) || envios.find(function(e) {
-        return e.fecha === hoy && e.horaSalida;
-      });
-    }
-
-    const panel = document.getElementById('trackerPanel');
-    if (!envioActivo || !envioActivo.horaSalida) {
-      panel.innerHTML = '<span style="color:#666;font-size:13px">Sin envío activo hoy. Registrá una salida para ver el tracker.</span>';
-      if (marcadorCamion) { marcadorCamion.remove(); marcadorCamion = null; }
+    if (!rutasKeys.length) {
+      panel.innerHTML = '<span style="color:#666;font-size:13px">Sin envío activo. Registrá una salida para ver el tracker.</span>';
       return;
     }
 
-    const minSalida = horaAMin(envioActivo.horaSalida);
-    const tiempoRutaMin = (rutaDistTotal / VEL_KMH) * 60;
-    const etaMin = minSalida + tiempoRutaMin;
-    const etaHora = minAHora(Math.round(etaMin));
+    // Construir HTML para cada envío en tránsito
+    let html = '';
+    rutasKeys.forEach(function(key) {
+      const r = rutasMulti[key];
+      const envio = r.envio;
+      if (!envio || !envio.horaSalida) return;
 
-    // Si ya llegó
-    if (envioActivo.horaLlegada) {
-      const minLlegada = horaAMin(envioActivo.horaLlegada);
-      const demoraMins = minLlegada - Math.round(etaMin);
-      const llegadoColor = demoraMins > 5 ? '#ff9800' : '#4caf50';
-      const demoraTexto = demoraMins > 0 ? '(' + demoraMins + ' min de demora)' : '(a tiempo)';
-      panel.innerHTML =
+      const minSalida = horaAMin(envio.horaSalida);
+      const tiempoRutaMin = (r.distTotal / VEL_KMH) * 60;
+      const etaMin = minSalida + tiempoRutaMin;
+      const etaHora = minAHora(Math.round(etaMin));
+      const minTranscurridos = minAhora - minSalida;
+      const kmRecorridoReal = (minTranscurridos / 60) * VEL_KMH;
+      // Limitar al 90% hasta que se confirme la recepción
+      const kmMax = r.distTotal * 0.90;
+      const kmRecorrido = Math.min(kmRecorridoReal, kmMax);
+      const kmRestante = Math.max(r.distTotal - kmRecorrido, 0);
+      const minRestantes = Math.round((kmRestante / VEL_KMH) * 60);
+      const etaActual = minAhora + minRestantes;
+      const etaActualHora = minAHora(etaActual);
+      const demoraVsETA = etaActual - Math.round(etaMin);
+      const pct = Math.min(100, Math.round((kmRecorrido / r.distTotal) * 100));
+
+      let estadoColor, estadoTexto, estadoBg;
+      if (minTranscurridos < 0) {
+        estadoColor = '#888'; estadoTexto = 'AÚN NO SALIÓ'; estadoBg = 'rgba(128,128,128,0.1)';
+      } else if (kmRecorrido >= r.distTotal) {
+        estadoColor = '#ff9800'; estadoTexto = 'DEBERÍA HABER LLEGADO'; estadoBg = 'rgba(255,152,0,0.15)';
+      } else if (demoraVsETA <= 2) {
+        estadoColor = '#4caf50'; estadoTexto = 'EN CAMINO · A TIEMPO'; estadoBg = 'rgba(76,175,80,0.1)';
+      } else {
+        estadoColor = '#ff9800'; estadoTexto = 'DEMORADO +' + demoraVsETA + ' min'; estadoBg = 'rgba(255,152,0,0.12)';
+      }
+
+      html +=
+        '<div style="margin-bottom:12px;padding-bottom:12px;border-bottom:1px solid var(--border)">' +
+        '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">' +
+          '<span style="background:' + r.color + ';color:#fff;padding:1px 7px;border-radius:4px;font-size:11px;font-weight:700">' + envio.patente + '</span>' +
+          '<span style="color:#aaa;font-size:11px">Suc.' + envio.origenId + ' → Suc.' + envio.destinoId + '</span>' +
+          '<span style="color:#888;font-size:11px">' + envio.chofer + '</span>' +
+        '</div>' +
         '<div class="tracker-row">' +
-        '<span class="tracker-badge" style="background:rgba(76,175,80,0.15);color:#4caf50">✓ LLEGÓ</span>' +
-        '<span>Salida: <b>' + envioActivo.horaSalida + '</b></span>' +
-        '<span>ETA estimada: <b>' + etaHora + '</b></span>' +
-        '<span>Llegada real: <b style="color:' + llegadoColor + '">' + envioActivo.horaLlegada + '</b></span>' +
-        '<span style="color:' + llegadoColor + '">' + demoraTexto + '</span>' +
+          '<span class="tracker-badge" style="background:' + estadoBg + ';color:' + estadoColor + '">' + estadoTexto + '</span>' +
+          '<span>Salida: <b>' + envio.horaSalida + '</b></span>' +
+          '<span>ETA: <b style="color:' + estadoColor + '">' + etaActualHora + '</b></span>' +
+          '<span style="color:#aaa">' + kmRecorrido.toFixed(1) + ' / ' + r.distTotal.toFixed(1) + ' km</span>' +
+        '</div>' +
+        '<div class="tracker-barra-wrap" style="margin-top:6px">' +
+          '<div class="tracker-barra-fill" style="width:' + pct + '%;background:' + estadoColor + '"></div>' +
+          '<span class="tracker-barra-pct">' + pct + '%</span>' +
+        '</div>' +
         '</div>';
-      // Poner camión en destino
-      if (mapa) {
-        const dest = rutaCoords[rutaCoords.length-1];
-        actualizarMarcadorCamion(dest, 0, true);
+
+      // Mover camión de esta ruta
+      if (mapa && minTranscurridos >= 0 && r.coords && r.coords.length) {
+        // Calcular posición en esta ruta específica
+        let posIdx = r.coords.length - 1;
+        for (let i = 1; i < r.distancias.length; i++) {
+          if (r.distancias[i] >= kmRecorrido) { posIdx = i; break; }
+        }
+        const llegado = kmRecorrido >= r.distTotal;
+        const pos = llegado ? r.coords[r.coords.length-1] : r.coords[posIdx];
+        const html_icon = llegado
+          ? '<div style="font-size:22px;filter:drop-shadow(0 2px 4px #000)">🏁</div>'
+          : '<div style="font-size:22px;filter:drop-shadow(0 2px 6px rgba(0,0,0,0.6));animation:pulso 1.2s infinite alternate">🚛</div>';
+        const icon = L.divIcon({ className: '', html: html_icon, iconAnchor: [11, 11] });
+        if (r.marcador) { r.marcador.setLatLng(pos); r.marcador.setIcon(icon); }
+
+        // Actualizar tramo recorrido de esta ruta
+        if (r.layerRecorrido && !llegado) {
+          const coordsHecho = r.coords.slice(0, posIdx).concat([pos]);
+          r.layerRecorrido.setLatLngs(coordsHecho);
+        }
+        if (r.layerPendiente && !llegado) {
+          const coordsPendiente = [pos].concat(r.coords.slice(posIdx));
+          r.layerPendiente.setLatLngs(coordsPendiente);
+        }
       }
-      return;
-    }
+    });
 
-    // En tránsito
-    const minTranscurridos = minAhora - minSalida;
-    const kmRecorrido = Math.min((minTranscurridos / 60) * VEL_KMH, rutaDistTotal);
-    const kmRestante = Math.max(rutaDistTotal - kmRecorrido, 0);
-    const minRestantes = Math.round((kmRestante / VEL_KMH) * 60);
-    const etaActual = minAhora + minRestantes;
-    const etaActualHora = minAHora(etaActual);
-
-    const demoraVsETA = etaActual - Math.round(etaMin);
-    let estadoColor, estadoTexto, estadoBg;
-    if (minTranscurridos < 0) {
-      estadoColor = '#888'; estadoTexto = 'AÚN NO SALIÓ'; estadoBg = 'rgba(128,128,128,0.1)';
-    } else if (kmRecorrido >= rutaDistTotal) {
-      estadoColor = '#888'; estadoTexto = 'DEBERÍA HABER LLEGADO'; estadoBg = 'rgba(255,152,0,0.15)';
-    } else if (demoraVsETA <= 2) {
-      estadoColor = '#4caf50'; estadoTexto = 'EN CAMINO · A TIEMPO'; estadoBg = 'rgba(76,175,80,0.1)';
-    } else {
-      estadoColor = '#ff9800'; estadoTexto = 'DEMORADO +' + demoraVsETA + ' min'; estadoBg = 'rgba(255,152,0,0.12)';
-    }
-
-    const pct = Math.min(100, Math.round((kmRecorrido / rutaDistTotal) * 100));
-
-    panel.innerHTML =
-      '<div class="tracker-row">' +
-        '<span class="tracker-badge" style="background:' + estadoBg + ';color:' + estadoColor + '">' + estadoTexto + '</span>' +
-        '<span>Salida: <b>' + envioActivo.horaSalida + '</b></span>' +
-        '<span>ETA original: <b>' + etaHora + '</b></span>' +
-        '<span>ETA actual: <b style="color:' + estadoColor + '">' + etaActualHora + '</b></span>' +
-        '<span style="color:#aaa">' + kmRecorrido.toFixed(1) + ' / ' + rutaDistTotal.toFixed(1) + ' km</span>' +
-      '</div>' +
-      '<div class="tracker-barra-wrap">' +
-        '<div class="tracker-barra-fill" style="width:' + pct + '%;background:' + estadoColor + '"></div>' +
-        '<span class="tracker-barra-pct">' + pct + '%</span>' +
-      '</div>';
-
-    // Mover marcador del camión y actualizar tramo recorrido
-    if (mapa && minTranscurridos >= 0) {
-      const pos = posEnRuta(kmRecorrido);
-      if (pos) {
-        actualizarMarcadorCamion(pos, pct, false);
-        actualizarProgresoCamino(kmRecorrido);
-      }
-    }
+    panel.innerHTML = html || '<span style="color:#666;font-size:13px">Sin envío activo.</span>';
   }
 
   function actualizarMarcadorCamion(pos, pct, llegado) {
@@ -297,83 +288,127 @@
     }
   }
 
-  async function dibujarRuta() {
-    if (!mapa) return;
-    const [origenId, origen] = getSucOrigen() || ['225', SUCURSALES_DEFAULT['225']];
-    const [destinoId, destino] = getSucDestino() || ['235', SUCURSALES_DEFAULT['235']];
+  async function dibujarRutaEnvio(envio, colorIdx) {
+    if (!mapa || !envio) return;
+    const key = envio.horaSalida + '_' + envio.patente + '_' + envio.origenId;
+    envio._mapaKey = key; // guardar para poder borrarla después
+    if (rutasMulti[key]) return; // ya dibujada
+
+    const origen = SUCURSALES[envio.origenId];
+    const destino = SUCURSALES[envio.destinoId];
+    if (!origen || !destino) return;
+
+    const color = COLORES_RUTA[colorIdx % COLORES_RUTA.length];
     const osrmUrl = 'https://router.project-osrm.org/route/v1/driving/' + origen.lng + ',' + origen.lat + ';' + destino.lng + ',' + destino.lat + '?overview=full&geometries=geojson';
 
     try {
-      document.getElementById('mapaStatus').textContent = 'Calculando ruta por calles...';
       const res = await fetch(osrmUrl);
-      const osrmData = await res.json();
-      if (osrmData.routes && osrmData.routes.length) {
-        rutaCoords = osrmData.routes[0].geometry.coordinates.map(function(c) { return [c[1], c[0]]; });
+      const data = await res.json();
+      if (!data.routes || !data.routes.length) return;
 
-        rutaDistancias = [0];
-        for (let i = 1; i < rutaCoords.length; i++) {
-          rutaDistancias.push(rutaDistancias[i-1] + haversine(rutaCoords[i-1], rutaCoords[i]));
-        }
-        rutaDistTotal = rutaDistancias[rutaDistancias.length-1];
-
-        // Capa gris — ruta completa por recorrer (aparece primero)
-        rutaLayerPendiente = L.polyline(rutaCoords, {
-          color: '#444', weight: 5, opacity: 0.55, dashArray: '6,5'
-        }).addTo(mapa);
-        rutaLayer = rutaLayerPendiente; // alias para borrarRuta
-
-        // Capa roja — tramo recorrido (empieza vacía en el origen)
-        rutaLayerRecorrido = L.polyline([rutaCoords[0]], {
-          color: '#e63946', weight: 6, opacity: 0.95, lineCap: 'round', lineJoin: 'round'
-        }).addTo(mapa);
-
-        // Flechas de dirección sobre la capa pendiente
-        flechasLayers = [];
-        const step = Math.max(1, Math.floor(rutaCoords.length / 4));
-        for (let i = step; i < rutaCoords.length - 2; i += step) {
-          const pf = rutaCoords[i];
-          const pt = rutaCoords[Math.min(i+3, rutaCoords.length-1)];
-          const ang = Math.atan2(pt[1]-pf[1], pt[0]-pf[0]) * 180 / Math.PI;
-          const ai = L.divIcon({
-            className: '',
-            html: '<div style="transform:rotate(' + (ang-90) + 'deg);font-size:16px;color:#666;filter:drop-shadow(0 0 2px #000)">&#9658;</div>',
-            iconAnchor: [8,8]
-          });
-          flechasLayers.push(L.marker(pf, { icon: ai, interactive: false }).addTo(mapa));
-        }
-
-        const dist = rutaDistTotal.toFixed(1);
-        const minsRuta = Math.round((rutaDistTotal / VEL_KMH) * 60);
-        document.getElementById('mapaStatus').textContent = '🚛 En camino — ' + dist + ' km · ~' + minsRuta + ' min a ' + VEL_KMH + ' km/h';
-        mapa.fitBounds(rutaLayerPendiente.getBounds(), { padding: [40, 40] });
-
-        actualizarTracker();
-        if (trackerInterval) clearInterval(trackerInterval);
-        trackerInterval = setInterval(actualizarTracker, 15000); // cada 15s para más fluidez
+      const coords = data.routes[0].geometry.coordinates.map(function(c) { return [c[1], c[0]]; });
+      const distancias = [0];
+      for (let i = 1; i < coords.length; i++) {
+        distancias.push(distancias[i-1] + haversine(coords[i-1], coords[i]));
       }
-    } catch(e) {
-      document.getElementById('mapaStatus').textContent = 'Sin conexion al servicio de rutas';
+      const distTotal = distancias[distancias.length-1];
+
+      const layerPendiente = L.polyline(coords, { color: '#444', weight: 5, opacity: 0.45, dashArray: '6,5' }).addTo(mapa);
+      const layerRecorrido = L.polyline([coords[0]], { color: color, weight: 6, opacity: 0.95, lineCap: 'round', lineJoin: 'round' }).addTo(mapa);
+
+      // Etiqueta de ruta
+      const midIdx = Math.floor(coords.length / 2);
+      const labelIcon = L.divIcon({
+        className: '',
+        html: '<div style="background:' + color + ';color:#fff;padding:2px 7px;border-radius:10px;font-size:10px;font-weight:700;white-space:nowrap;box-shadow:0 1px 4px rgba(0,0,0,0.5)">' + envio.patente + '</div>',
+        iconAnchor: [20, 8]
+      });
+      const labelMarker = L.marker(coords[midIdx], { icon: labelIcon, interactive: false }).addTo(mapa);
+
+      // Ícono camión
+      const camionIcon = L.divIcon({
+        className: '',
+        html: '<div style="font-size:22px;filter:drop-shadow(0 2px 4px rgba(0,0,0,0.6))">🚛</div>',
+        iconAnchor: [11, 11]
+      });
+      const marcador = L.marker(coords[0], { icon: camionIcon }).addTo(mapa);
+
+      rutasMulti[key] = { layerPendiente, layerRecorrido, labelMarker, marcador, coords, distancias, distTotal, color, envio };
+
+      // Compat con sistema de tracker existente (usa primer envío)
+      if (colorIdx === 0) {
+        rutaCoords = coords; rutaDistancias = distancias; rutaDistTotal = distTotal;
+        rutaLayerPendiente = layerPendiente; rutaLayerRecorrido = layerRecorrido;
+        rutaLayer = layerPendiente; marcadorCamion = marcador;
+      }
+    } catch(e) { console.error('Error ruta', envio.patente, e); }
+  }
+
+  async function dibujarTodasLasRutas() {
+    if (!mapa) return;
+    const enviosT = window._enviosEnCurso || [];
+    if (!enviosT.length) {
+      document.getElementById('mapaStatus').textContent = '📍 Sin envíos activos — la ruta aparece al confirmar salida';
+      return;
     }
+    document.getElementById('mapaStatus').textContent = 'Calculando rutas...';
+    const bounds = L.latLngBounds([]);
+    for (let i = 0; i < enviosT.length; i++) {
+      await dibujarRutaEnvio(enviosT[i], i);
+      const key = enviosT[i]._mapaKey;
+      if (key && rutasMulti[key]) bounds.extend(rutasMulti[key].layerPendiente.getBounds());
+    }
+    if (bounds.isValid()) mapa.fitBounds(bounds, { padding: [40, 40] });
+    const total = enviosT.length;
+    document.getElementById('mapaStatus').textContent = '🚛 ' + total + ' envío' + (total > 1 ? 's' : '') + ' en tránsito';
+    actualizarTracker();
+    if (trackerInterval) clearInterval(trackerInterval);
+    trackerInterval = setInterval(actualizarTracker, 15000);
+  }
+
+  async function dibujarRuta() {
+    await dibujarTodasLasRutas();
   }
 
   function borrarRuta() {
-    if (rutaLayerPendiente) { rutaLayerPendiente.remove(); rutaLayerPendiente = null; }
-    if (rutaLayerRecorrido) { rutaLayerRecorrido.remove(); rutaLayerRecorrido = null; }
-    rutaLayer = null;
-    flechasLayers.forEach(function(m) { m.remove(); });
-    flechasLayers = [];
-    rutaCoords = [];
-    rutaDistancias = [];
-    rutaDistTotal = 0;
+    Object.values(rutasMulti).forEach(function(r) {
+      if (r.layerPendiente) r.layerPendiente.remove();
+      if (r.layerRecorrido) r.layerRecorrido.remove();
+      if (r.labelMarker) r.labelMarker.remove();
+      if (r.marcador) r.marcador.remove();
+    });
+    for (const k in rutasMulti) delete rutasMulti[k];
+    rutaLayerPendiente = null; rutaLayerRecorrido = null; rutaLayer = null;
+    flechasLayers.forEach(function(m) { m.remove(); }); flechasLayers = [];
+    rutaCoords = []; rutaDistancias = []; rutaDistTotal = 0;
     if (marcadorCamion) { marcadorCamion.remove(); marcadorCamion = null; }
     if (trackerInterval) { clearInterval(trackerInterval); trackerInterval = null; }
   }
 
   window.initMapa = async function() {
     if (mapa) {
-      // Mapa ya existe — solo verificar si hay que dibujar la ruta
-      if (hayEnvioActivo() && !rutaLayer) await dibujarRuta();
-      else if (!hayEnvioActivo() && rutaLayer) borrarRuta();
+      // Mapa ya existe — sincronizar rutas con envíos en tránsito actuales
+      const enviosT = window._enviosEnCurso || [];
+      // Borrar rutas de envíos que ya completaron
+      for (const key in rutasMulti) {
+        const sigueActivo = enviosT.some(function(e) {
+          return e._mapaKey === key;
+        });
+        if (!sigueActivo) {
+          const r = rutasMulti[key];
+          if (r.layerPendiente) r.layerPendiente.remove();
+          if (r.layerRecorrido) r.layerRecorrido.remove();
+          if (r.labelMarker) r.labelMarker.remove();
+          if (r.marcador) r.marcador.remove();
+          delete rutasMulti[key];
+        }
+      }
+      // Dibujar rutas nuevas
+      if (enviosT.length) {
+        await dibujarTodasLasRutas();
+      } else if (!enviosT.length && Object.keys(rutasMulti).length === 0) {
+        document.getElementById('mapaStatus').textContent = '📍 Sin envíos activos — la ruta aparece al confirmar salida';
+      }
       actualizarTracker();
       return;
     }
@@ -386,8 +421,10 @@
     Object.entries(SUCURSALES).forEach(([id, s]) => {
       const icon = L.divIcon({
         className: '',
-        html: '<div style="background:' + s.color + ';color:#fff;padding:5px 10px;border-radius:5px;font-family:DM Sans,sans-serif;font-weight:600;font-size:12px;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,0.4)">' + s.label + '</div>',
-        iconAnchor: [30, 10]
+        html: '<div style="background:' + s.color + ';border:2px solid rgba(255,255,255,0.8);border-radius:8px;padding:4px 8px;font-family:DM Sans,sans-serif;font-weight:700;font-size:12px;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,0.6);display:flex;align-items:center;gap:4px;color:#fff">' +
+              '🛒 ' + id +
+              '</div>',
+        iconAnchor: [28, 14]
       });
       L.marker([s.lat, s.lng], { icon }).addTo(mapa);
     });
@@ -395,9 +432,8 @@
     const [,origen] = getSucOrigen() || ['225', SUCURSALES_DEFAULT['225']];
     const [,destino] = getSucDestino() || ['235', SUCURSALES_DEFAULT['235']];
 
-    if (hayEnvioActivo()) {
-      // Hay envío activo — dibujar ruta
-      await dibujarRuta();
+    if ((window._enviosEnCurso && window._enviosEnCurso.length) || hayEnvioActivo()) {
+      await dibujarTodasLasRutas();
     } else {
       // Sin envío activo — mostrar mapa con marcadores, sin ruta
       const bounds = L.latLngBounds([
@@ -471,16 +507,83 @@
   }
 
   window.guardarEnvio = async function() {
-    console.log('[GUARDAR] función iniciada');
     // Validar datos de recepción (los de salida vienen de _envioEnCurso)
     const tempLlegada = document.getElementById('tempLlegada').value;
     let horaLlegada = document.getElementById('horaLlegada').value;
+
 
     if (!tempLlegada) {
       mostrarToast('Ingresá la temperatura de llegada ⚠️', 'warn');
       document.getElementById('tempLlegada').focus();
       return;
     }
+
+    // Modal de confirmación con sucursal receptora
+    const ec = window._envioActivoSeleccionado || window._envioEnCurso;
+    const origenId = ec ? ec.origenId : '?';
+    const destinoId = ec ? ec.destinoId : '?';
+    const patente = ec ? ec.patente : '?';
+
+    const sucReceptora = await new Promise(function(resolve) {
+      // Construir opciones de sucursales
+      const opcionesHTML = Object.entries(SUCURSALES).map(function([id, s]) {
+        return '<button onclick="window._sucSelModal='' + id + ''" style="background:' + s.color + ';color:#fff;border:none;border-radius:8px;padding:10px 18px;font-size:14px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:8px;width:100%">' +
+               '<span style="font-size:18px">🛒</span> Suc. ' + id + '</button>';
+      }).join('');
+
+      const modal = document.createElement('div');
+      modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px';
+      modal.innerHTML =
+        '<div style="background:#1a1a1a;border:1px solid #333;border-radius:16px;padding:28px;max-width:380px;width:100%">' +
+          '<div style="font-size:18px;font-weight:700;margin-bottom:6px;color:#fff">¿Desde qué sucursal confirmás?</div>' +
+          '<div style="color:#888;font-size:13px;margin-bottom:20px">Seleccioná tu sucursal para registrar la recepción</div>' +
+          '<div style="display:flex;flex-direction:column;gap:10px" id="modalSucBtns">' + opcionesHTML + '</div>' +
+          '<button onclick="window._sucSelModal=null;document.body.removeChild(this.closest('[style*=\"fixed\"]'))" style="margin-top:18px;background:transparent;border:1px solid #444;color:#888;border-radius:8px;padding:8px;width:100%;cursor:pointer;font-size:13px">Cancelar</button>' +
+        '</div>';
+
+      document.body.appendChild(modal);
+
+      // Listener para botones de sucursal
+      modal.querySelector('#modalSucBtns').addEventListener('click', function(e) {
+        const btn = e.target.closest('button[onclick]');
+        if (!btn) return;
+        btn.onclick && btn.onclick();
+        const selId = window._sucSelModal;
+        if (!selId) return;
+        document.body.removeChild(modal);
+
+        // Segundo modal: confirmación final
+        const oSuc = SUCURSALES[origenId] || {};
+        const dSuc = SUCURSALES[destinoId] || {};
+        const modal2 = document.createElement('div');
+        modal2.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px';
+        modal2.innerHTML =
+          '<div style="background:#1a1a1a;border:1px solid #333;border-radius:16px;padding:28px;max-width:380px;width:100%">' +
+            '<div style="font-size:18px;font-weight:700;margin-bottom:16px;color:#fff">⚠️ Confirmá la recepción</div>' +
+            '<div style="background:#111;border-radius:10px;padding:16px;margin-bottom:20px;display:flex;flex-direction:column;gap:10px;font-size:14px">' +
+              '<div style="display:flex;justify-content:space-between"><span style="color:#666">Ruta</span>' +
+              '<span><span style="background:' + (oSuc.color||'#888') + ';color:#fff;padding:2px 8px;border-radius:4px;font-weight:700;font-size:12px">Suc. ' + origenId + '</span>' +
+              ' → <span style="background:' + (dSuc.color||'#888') + ';color:#fff;padding:2px 8px;border-radius:4px;font-weight:700;font-size:12px">Suc. ' + destinoId + '</span></span></div>' +
+              '<div style="display:flex;justify-content:space-between"><span style="color:#666">Patente</span><span style="font-weight:700;color:#fff">' + patente + '</span></div>' +
+              '<div style="display:flex;justify-content:space-between"><span style="color:#666">Temp. llegada</span><span style="font-weight:700;color:#4caf50">' + tempLlegada + '°C</span></div>' +
+              '<div style="display:flex;justify-content:space-between;border-top:1px solid #333;padding-top:10px"><span style="color:#666">Confirma</span><span style="font-weight:700;color:#fff">Suc. ' + selId + '</span></div>' +
+            '</div>' +
+            (selId !== destinoId ? '<div style="background:rgba(255,152,0,0.12);border:1px solid #ff9800;border-radius:8px;padding:10px;color:#ff9800;font-size:12px;margin-bottom:16px">⚠️ La sucursal seleccionada (Suc. ' + selId + ') no coincide con el destino esperado (Suc. ' + destinoId + ')</div>' : '') +
+            '<div style="display:flex;gap:10px">' +
+              '<button id="modal2Cancel" style="flex:1;background:transparent;border:1px solid #444;color:#888;border-radius:8px;padding:10px;cursor:pointer;font-size:13px">Cancelar</button>' +
+              '<button id="modal2Ok" style="flex:2;background:#4caf50;border:none;color:#fff;border-radius:8px;padding:10px;cursor:pointer;font-size:14px;font-weight:700">✅ Confirmar recepción</button>' +
+            '</div>' +
+          '</div>';
+        document.body.appendChild(modal2);
+        modal2.querySelector('#modal2Cancel').onclick = function() { document.body.removeChild(modal2); resolve(null); };
+        modal2.querySelector('#modal2Ok').onclick = function() { document.body.removeChild(modal2); resolve(selId); };
+      });
+
+      // Cancelar
+      modal.querySelector('button:last-child').onclick = function() { document.body.removeChild(modal); resolve(null); };
+    });
+
+    if (!sucReceptora) return;
     // Si no confirmaron hora, tomarla ahora automáticamente
     if (!horaLlegada) {
       registrarHoraLlegada();
@@ -488,22 +591,22 @@
     }
 
     // Fuente de datos de salida: _envioEnCurso (si hay) o DOM (si es edición)
-    const ec = window._envioEnCurso;
+    const ecActual = window._envioEnCurso;
     const data = {
-      fecha:        ec ? ec.fecha     : document.getElementById('fecha').value,
-      chofer:       ec ? ec.chofer    : document.getElementById('chofer').value.trim(),
-      patente:      ec ? ec.patente   : document.getElementById('patente').value.toUpperCase().replace(/\s/g,''),
-      origenId:     ec ? ec.origenId  : (getSucOrigen()||['225'])[0],
-      destinoId:    ec ? ec.destinoId : (getSucDestino()||['235'])[0],
-      horaSalida:   ec ? ec.horaSalida : document.getElementById('horaSalida').value,
-      tempSalida:   ec ? ec.tempSalida : document.getElementById('tempSalida').value,
+      fecha:        ecActual ? ecActual.fecha     : document.getElementById('fecha').value,
+      chofer:       ecActual ? ecActual.chofer    : document.getElementById('chofer').value.trim(),
+      patente:      ecActual ? ecActual.patente   : document.getElementById('patente').value.toUpperCase().replace(/\s/g,''),
+      origenId:     ecActual ? ecActual.origenId  : (getSucOrigen()||['225'])[0],
+      destinoId:    ecActual ? ecActual.destinoId : (getSucDestino()||['235'])[0],
+      horaSalida:   ecActual ? ecActual.horaSalida : document.getElementById('horaSalida').value,
+      tempSalida:   ecActual ? ecActual.tempSalida : document.getElementById('tempSalida').value,
       horaLlegada:  horaLlegada,
       tempLlegada:  tempLlegada,
       observaciones: document.getElementById('observaciones').value,
       desvios:      document.getElementById('desviosSeleccionados').value,
       fotoUrl:      window._fotoRecepcionBase64 || fotoBase64 || null,
-      fotoSalidaUrl: (ec && ec.fotoSalidaBase64) || window._fotoSalidaBase64 || null,
-      sinFotoEvidencia: ec ? ec.sinFotoEvidencia : (window._salidaSinFoto || false),
+      fotoSalidaUrl: (ecActual && ecActual.fotoSalidaBase64) || window._fotoSalidaBase64 || null,
+      sinFotoEvidencia: ecActual ? ecActual.sinFotoEvidencia : (window._salidaSinFoto || false),
       fechaCreacion: Date.now()
     };
 
@@ -513,7 +616,6 @@
 
     try {
       let res;
-      console.log('[GUARDAR] editandoId:', editandoId, '| data:', data);
       if (editandoId) {
         res = await gasPost({ accion: 'editar', id: editandoId, data: data });
         mostrarToast('Actualizado ✓', 'ok');
@@ -521,7 +623,6 @@
         res = await gasPost({ accion: 'guardar', data: data });
         mostrarToast('Guardado: ' + JSON.stringify(res), 'ok');
       }
-      console.log('[GUARDAR] respuesta:', res);
       if (res && res.error) throw new Error(res.error);
       await cargarEnvios();
     } catch(e) {
@@ -529,8 +630,19 @@
       console.error(e);
     }
 
-    window._envioEnCurso = null;
+    // Sacar el envío completado del array en tránsito
+    if (window._envioActivoSeleccionado) {
+      window._enviosEnCurso = (window._enviosEnCurso||[]).filter(function(e) {
+        return e !== window._envioActivoSeleccionado;
+      });
+      window._envioActivoSeleccionado = null;
+    } else if (window._enviosEnCurso && window._enviosEnCurso.length) {
+      window._enviosEnCurso.shift();
+    }
+    window._envioEnCurso = window._enviosEnCurso && window._enviosEnCurso[0] || null;
     window._fotoRecepcionBase64 = null;
+    const selR = document.getElementById('sucReceptora');
+    if (selR) selR.value = '';
     window._fotoRecepcionFile = null;
     editandoId = null;
     // Deshabilitar tab Recepción
@@ -742,49 +854,136 @@
     if (!card || !lista) return;
     const hoy = new Date().toISOString().slice(0,10);
     const hoy_envios = envios.filter(function(e) {
-      return e.fecha === hoy && e.horaLlegada; // solo los completos
+      return e.fecha === hoy;
     });
     if (!hoy_envios.length) { card.style.display = 'none'; return; }
     card.style.display = 'block';
-    lista.innerHTML = hoy_envios.map(function(e) {
+    lista.innerHTML = hoy_envios.map(function(e, idx) {
       const oSuc = SUCURSALES[e.origenId] || {};
       const dSuc = SUCURSALES[e.destinoId] || {};
+      const completo = !!e.horaLlegada;
       const diffTemp = parseFloat(e.tempLlegada) - parseFloat(e.tempSalida);
-      const alerta = Math.abs(diffTemp) > 2;
+      const alerta = completo && Math.abs(diffTemp) > 2;
+      const estado = !completo
+        ? '<span style="background:#ff9800;color:#000;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700">🚚 EN TRÁNSITO</span>'
+        : (alerta
+          ? '<span style="background:#f44336;color:#fff;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700">⚠️ REVISAR</span>'
+          : '<span style="background:#4caf50;color:#fff;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700">✓ OK</span>');
+
       const durMin = e.horaSalida && e.horaLlegada
         ? horaAMin(e.horaLlegada) - horaAMin(e.horaSalida) : null;
-      const durStr = durMin !== null ? durMin + ' min' : '—';
-      const desvioHtml = e.desvios
-        ? '<span class="desvio-badge" style="border-color:#ff9800;color:#ff9800;background:rgba(255,152,0,0.08)">' + (DESVIOS_LABELS[e.desvios] || e.desvios) + '</span>'
-        : '';
-      return '<div class="envio-dia-row">' +
-        '<div class="envio-dia-ruta">' +
-          '<span style="background:' + (oSuc.color||'#888') + ';color:#fff;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700">Suc. ' + e.origenId + '</span>' +
-          '<span style="color:#555;padding:0 6px">→</span>' +
-          '<span style="background:' + (dSuc.color||'#888') + ';color:#fff;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700">Suc. ' + e.destinoId + '</span>' +
+
+      return '<div class="envio-acordeon" id="acordeon_' + idx + '">' +
+        // Cabecera clicable
+        '<div class="envio-acordeon-header" onclick="toggleAcordeon(' + idx + ')">' +
+          '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">' +
+            '<span style="background:' + (oSuc.color||'#888') + ';color:#fff;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700">Suc. ' + e.origenId + '</span>' +
+            '<span style="color:#555">→</span>' +
+            '<span style="background:' + (dSuc.color||'#888') + ';color:#fff;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700">Suc. ' + e.destinoId + '</span>' +
+            '<span class="patente-badge" style="font-size:11px">' + formatPatenteBadge(e.patente) + '</span>' +
+            '<span style="color:#aaa;font-size:12px">' + e.horaSalida + '</span>' +
+            estado +
+          '</div>' +
+          '<span class="acordeon-flecha" id="flecha_' + idx + '">▼</span>' +
         '</div>' +
-        '<div class="envio-dia-datos">' +
-          '<span class="patente-badge" style="font-size:11px">' + formatPatenteBadge(e.patente) + '</span>' +
-          '<span style="color:#aaa;font-size:12px">' + e.chofer + '</span>' +
-          '<span style="color:#aaa;font-size:12px">🕐 ' + e.horaSalida + ' → ' + e.horaLlegada + ' (' + durStr + ')</span>' +
-          '<span class="' + (alerta ? 'temp temp-warn' : 'temp') + '" style="font-size:12px">' + e.tempSalida + '°C → ' + e.tempLlegada + '°C</span>' +
-          (desvioHtml ? desvioHtml : '<span style="color:#4caf50;font-size:11px">✓ Sin desvíos</span>') +
+        // Contenido expandible
+        '<div class="envio-acordeon-body" id="body_' + idx + '" style="display:none">' +
+          '<div class="envio-dia-datos">' +
+            '<div class="envio-detail-row"><span class="envio-detail-label">Chofer</span><span>' + e.chofer + '</span></div>' +
+            '<div class="envio-detail-row"><span class="envio-detail-label">Patente</span><span class="patente-badge" style="font-size:11px">' + formatPatenteBadge(e.patente) + '</span></div>' +
+            '<div class="envio-detail-row"><span class="envio-detail-label">Hora salida</span><span style="color:var(--accent);font-weight:700">' + e.horaSalida + '</span></div>' +
+            '<div class="envio-detail-row"><span class="envio-detail-label">Temp. salida</span><span>' + e.tempSalida + '°C</span></div>' +
+            (completo ? (
+              '<div class="envio-detail-row"><span class="envio-detail-label">Hora llegada</span><span style="color:#4caf50;font-weight:700">' + e.horaLlegada + '</span></div>' +
+              '<div class="envio-detail-row"><span class="envio-detail-label">Temp. llegada</span><span class="' + (alerta?'temp temp-warn':'') + '">' + e.tempLlegada + '°C</span></div>' +
+              '<div class="envio-detail-row"><span class="envio-detail-label">Duración</span><span>' + (durMin !== null ? durMin + ' min' : '—') + '</span></div>' +
+              (e.desvios ? '<div class="envio-detail-row"><span class="envio-detail-label">Desvío</span><span style="color:#ff9800">' + (DESVIOS_LABELS[e.desvios]||e.desvios) + '</span></div>' : '') +
+              (e.observaciones ? '<div class="envio-detail-row"><span class="envio-detail-label">Obs.</span><span>' + e.observaciones + '</span></div>' : '')
+            ) : '<div class="envio-detail-row" style="color:#ff9800;grid-column:1/-1">⏳ Esperando recepción en destino...</div>') +
+          '</div>' +
         '</div>' +
       '</div>';
     }).join('');
   }
 
-  // ── Diagnóstico ─────────────────────────────────────────────────────────
-  window.debugPing = async function() {
-    const out = document.getElementById('debugOutput');
-    out.textContent = 'Probando ping...';
-    try {
-      const r = await fetch(GAS_URL + '?accion=ping', { redirect: 'follow' });
-      const text = await r.text();
-      out.textContent = 'HTTP ' + r.status + '\n' + text;
-    } catch(e) { out.textContent = 'ERROR: ' + e.message; }
+  function renderEnviosEnTransito() {
+    const lista = document.getElementById('recepcionResumenBody');
+    const card = document.getElementById('recepcionResumen');
+    if (!lista) return;
+    const envios_t = window._enviosEnCurso || [];
+    if (!envios_t.length) {
+      if (card) card.style.display = 'none';
+      return;
+    }
+    if (card) card.style.display = 'block';
+    // Si no hay seleccionado, auto-seleccionar el primero
+    if (!window._envioActivoSeleccionado && envios_t.length) {
+      window._envioActivoSeleccionado = envios_t[0];
+      window._envioEnCurso = envios_t[0];
+      const dId0 = envios_t[0].destinoId;
+      const dSuc0 = SUCURSALES[dId0] || {};
+      const lLleg = document.getElementById('labelLlegada');
+      if (lLleg) lLleg.innerHTML =
+        '<span style="background:' + (dSuc0.color||'#888') + ';color:#fff;padding:2px 8px;border-radius:3px;font-size:11px;font-weight:700;margin-right:6px">Suc. ' + dId0 + '</span>' +
+        'Llegada — ' + (dSuc0.direccion || dSuc0.label || '');
+    }
+    lista.innerHTML = envios_t.map(function(e, idx) {
+      const oSuc = SUCURSALES[e.origenId] || {};
+      const dSuc = SUCURSALES[e.destinoId] || {};
+      const activo = window._envioActivoSeleccionado === e;
+      return '<div class="envio-transito-card ' + (activo ? 'activo' : '') + '" id="transito_' + idx + '" onclick="seleccionarEnvioTransito(' + idx + ')" style="cursor:pointer;border:2px solid ' + (activo ? 'var(--accent2)' : 'var(--border)') + ';border-radius:10px;padding:12px 14px;margin-bottom:8px;background:' + (activo ? 'rgba(33,150,243,0.08)' : 'var(--surface2)') + '">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">' +
+          '<div style="display:flex;gap:8px;align-items:center">' +
+            '<span style="background:' + (oSuc.color||'#888') + ';color:#fff;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700">Suc. ' + e.origenId + '</span>' +
+            '<span style="color:#555">→</span>' +
+            '<span style="background:' + (dSuc.color||'#888') + ';color:#fff;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700">Suc. ' + e.destinoId + '</span>' +
+          '</div>' +
+          '<span style="background:#ff9800;color:#000;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700">🚚 EN TRÁNSITO</span>' +
+        '</div>' +
+        '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;font-size:12px">' +
+          '<div><div style="color:#666;font-size:10px;text-transform:uppercase">Chofer</div>' + e.chofer + '</div>' +
+          '<div><div style="color:#666;font-size:10px;text-transform:uppercase">Patente</div><span class="patente-badge" style="font-size:11px">' + formatPatenteBadge(e.patente) + '</span></div>' +
+          '<div><div style="color:#666;font-size:10px;text-transform:uppercase">Hora salida</div><span style="color:var(--accent);font-weight:700">' + e.horaSalida + '</span></div>' +
+          '<div><div style="color:#666;font-size:10px;text-transform:uppercase">Temp. salida</div>' + e.tempSalida + '°C</div>' +
+        '</div>' +
+        (activo ? '<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--border);color:var(--accent2);font-size:11px;font-weight:600">✏️ Completando recepción para este envío</div>' : '<div style="margin-top:8px;color:#888;font-size:11px">Tocá para registrar la recepción</div>') +
+      '</div>';
+    }).join('');
+  }
+
+  window.seleccionarEnvioTransito = function(idx) {
+    const envios_t = window._enviosEnCurso || [];
+    if (!envios_t[idx]) return;
+    window._envioActivoSeleccionado = envios_t[idx];
+    window._envioEnCurso = envios_t[idx]; // compat
+    // Actualizar label destino en el formulario de recepción
+    const dId = envios_t[idx].destinoId;
+    const dSuc = SUCURSALES[dId] || {};
+    const lLleg = document.getElementById('labelLlegada');
+    if (lLleg) lLleg.innerHTML =
+      '<span style="background:' + (dSuc.color||'#888') + ';color:#fff;padding:2px 8px;border-radius:3px;font-size:11px;font-weight:700;margin-right:6px">Suc. ' + dId + '</span>' +
+      'Llegada — ' + (dSuc.direccion || dSuc.label || '');
+    // Limpiar campos de recepción
+    document.getElementById('tempLlegada').value = '';
+    document.getElementById('horaLlegada').value = '';
+    document.getElementById('desviosSeleccionados').value = '';
+    onDesvioChange();
+    document.getElementById('observaciones').value = '';
+    renderEnviosEnTransito();
+    // Scroll al formulario
+    document.getElementById('tempLlegada').scrollIntoView({ behavior: 'smooth' });
   };
-  window.debugListar = async function() {
+
+    window.toggleAcordeon = function(idx) {
+    const body = document.getElementById('body_' + idx);
+    const flecha = document.getElementById('flecha_' + idx);
+    if (!body) return;
+    const abierto = body.style.display !== 'none';
+    body.style.display = abierto ? 'none' : 'block';
+    if (flecha) flecha.textContent = abierto ? '▼' : '▲';
+  };
+
+    window.debugListar = async function() {
     const out = document.getElementById('debugOutput');
     out.textContent = 'Listando...';
     try {
@@ -964,7 +1163,7 @@
   };
 
   // Datos del envío en curso (pasados entre tabs)
-  window._envioEnCurso = null;
+  window._enviosEnCurso = window._enviosEnCurso || [];
 
   window.registrarHoraSalida = function() {
     const temp = document.getElementById('tempSalida').value;
@@ -982,7 +1181,7 @@
     // Guardar datos del envío en curso
     const oId = document.getElementById('formOrigen').value;
     const dId = document.getElementById('formDestino').value;
-    window._envioEnCurso = {
+    const nuevoEnvio = {
       fecha:     document.getElementById('fecha').value,
       chofer:    document.getElementById('chofer').value.trim(),
       patente:   document.getElementById('patente').value.toUpperCase().replace(/\s/g,''),
@@ -991,27 +1190,17 @@
       horaSalida: hora,
       tempSalida: temp,
       fotoSalidaBase64: fotoBase64 || null,
-      fotoSalidaFile:   window._fotoFile || null,
-      sinFotoEvidencia: !fotoBase64
+      sinFotoEvidencia: !fotoBase64,
+      sheetId: null
     };
+    window._enviosEnCurso = window._enviosEnCurso || [];
+    window._enviosEnCurso.push(nuevoEnvio);
+    window._envioEnCurso = nuevoEnvio; // compat
     window._fotoSalidaBase64 = fotoBase64 || null;
     window._salidaSinFoto = !fotoBase64;
 
-    // Mostrar resumen en tab Recepción
-    const oSuc = SUCURSALES[oId] || {};
-    const dSuc = SUCURSALES[dId] || {};
-    const resumen = document.getElementById('recepcionResumenBody');
-    if (resumen) {
-      resumen.innerHTML =
-        '<div class="resumen-dato"><div class="resumen-label">Fecha</div><div class="resumen-val">' + window._envioEnCurso.fecha + '</div></div>' +
-        '<div class="resumen-dato"><div class="resumen-label">Chofer</div><div class="resumen-val">' + window._envioEnCurso.chofer + '</div></div>' +
-        '<div class="resumen-dato"><div class="resumen-label">Patente</div><div class="resumen-val"><span class="patente-badge">' + formatPatenteBadge(window._envioEnCurso.patente) + '</span></div></div>' +
-        '<div class="resumen-dato"><div class="resumen-label">Origen</div><div class="resumen-val"><span style="background:' + (oSuc.color||'#888') + ';color:#fff;padding:2px 8px;border-radius:4px;font-size:12px;font-weight:700">Suc. ' + oId + '</span></div></div>' +
-        '<div class="resumen-dato"><div class="resumen-label">Destino</div><div class="resumen-val"><span style="background:' + (dSuc.color||'#888') + ';color:#fff;padding:2px 8px;border-radius:4px;font-size:12px;font-weight:700">Suc. ' + dId + '</span></div></div>' +
-        '<div class="resumen-dato"><div class="resumen-label">Hora salida</div><div class="resumen-val" style="color:var(--accent);font-weight:700;font-size:16px">' + hora + '</div></div>' +
-        '<div class="resumen-dato"><div class="resumen-label">Temp. salida</div><div class="resumen-val" style="font-size:16px;font-weight:700">' + temp + '°C</div></div>' +
-        (window._fotoSalidaBase64 ? '<div class="resumen-dato"><div class="resumen-label">Foto salida</div><div class="resumen-val"><img src="' + window._fotoSalidaBase64 + '" style="width:56px;height:56px;object-fit:cover;border-radius:6px;border:2px solid var(--ok)"></div></div>' : '<div class="resumen-dato"><div class="resumen-label">Foto salida</div><div class="resumen-val sin-foto-badge">📷 Sin foto</div></div>');
-    }
+    // Actualizar lista de envíos en tránsito
+    renderEnviosEnTransito();
 
     // Habilitar y abrir tab Recepción
     const tabBtn = document.getElementById('tabRecepcion');
@@ -1020,6 +1209,30 @@
 
     // Resetear formulario de salida para próximo envío
     setTimeout(function() { resetFormSalida(); }, 300);
+
+    // Guardar salida en Sheet inmediatamente
+    (async function(envio) {
+      try {
+        const res = await gasPost({ accion: 'guardar', data: {
+          fecha:           envio.fecha,
+          chofer:          envio.chofer,
+          patente:         envio.patente,
+          origenId:        envio.origenId,
+          destinoId:       envio.destinoId,
+          horaSalida:      envio.horaSalida,
+          tempSalida:      envio.tempSalida,
+          horaLlegada:     '',
+          tempLlegada:     '',
+          desvios:         '',
+          observaciones:   '',
+          sinFotoEvidencia: envio.sinFotoEvidencia
+        }});
+        if (res && res.id) {
+          envio.sheetId = res.id;
+        }
+        await cargarEnvios();
+      } catch(e) { console.error('Error guardando salida:', e); }
+    })(nuevoEnvio);
 
     mostrarToast('Salida registrada — completá la recepción en destino 📥', 'ok');
 
@@ -1031,7 +1244,7 @@
     // Si el tab mapa está activo, redibujar; si no, se dibuja al abrirlo
     const tabMapaEl = document.getElementById('tab-mapa');
     if (tabMapaEl && tabMapaEl.classList.contains('active')) {
-      setTimeout(function() { window.initMapa(); }, 200);
+      setTimeout(async function() { await dibujarTodasLasRutas(); }, 300);
     }
     actualizarTracker();
   };
@@ -1124,6 +1337,7 @@
     const ids = Object.keys(SUCURSALES);
     const selO = document.getElementById('formOrigen');
     const selD = document.getElementById('formDestino');
+    const selR = document.getElementById('sucReceptora');
     if (!selO || !selD) return;
     const activeO = localStorage.getItem('suc_origen_active') || (Object.entries(SUCURSALES).find(([,s])=>s.rol==='origen')||[''])[0];
     const activeD = localStorage.getItem('suc_destino_active') || (Object.entries(SUCURSALES).find(([,s])=>s.rol==='destino')||[''])[0];
@@ -1135,6 +1349,13 @@
       const s = SUCURSALES[id];
       return '<option value="' + id + '"' + (id === activeD ? ' selected' : '') + '>Suc. ' + id + ' — ' + (s.direccion||s.dir||'') + '</option>';
     }).join('');
+    if (selR) {
+      selR.innerHTML = '<option value="">— Seleccioná tu sucursal —</option>' +
+        ids.map(function(id) {
+          const s = SUCURSALES[id];
+          return '<option value="' + id + '">Suc. ' + id + ' — ' + (s.direccion||s.dir||'') + '</option>';
+        }).join('');
+    }
     onFormRutaChange();
   }
 
@@ -2159,6 +2380,48 @@
   }
   .btn-centrar:active { transform: scale(0.97); }
 
+  .envio-acordeon {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    margin-bottom: 8px;
+    overflow: hidden;
+    background: var(--surface2);
+  }
+  .envio-acordeon:last-child { margin-bottom: 0; }
+  .envio-acordeon-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 14px;
+    cursor: pointer;
+    user-select: none;
+    transition: background 0.15s;
+  }
+  .envio-acordeon-header:hover { background: rgba(255,255,255,0.04); }
+  .acordeon-flecha { color: #666; font-size: 11px; transition: transform 0.2s; }
+  .envio-acordeon-body {
+    padding: 0 14px 14px;
+    border-top: 1px solid var(--border);
+  }
+  .envio-dia-datos {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    padding-top: 10px;
+  }
+  .envio-detail-row {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-size: 12px;
+  }
+  .envio-detail-label {
+    color: #666;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
   .envio-dia-row {
     border: 1px solid var(--border);
     border-radius: 8px;
@@ -2413,7 +2676,7 @@
       </div>
     </div>
 
-    <button class="btn-primary" id="btnGuardar" onclick="alert('CLICK OK - temp:' + document.getElementById('tempLlegada').value + ' hora:' + document.getElementById('horaLlegada').value); guardarEnvio();">✅ Guardar recepción completa</button>
+    <button class="btn-primary" id="btnGuardar" onclick="guardarEnvio()">✅ Guardar recepción completa</button>
   </div>
 
   <!-- Envíos del día completados -->
@@ -2493,7 +2756,7 @@
   </div>
 
   <div class="card">
-    <div class="card-title">Ruta — Suc. 225 → Suc. 235</div>
+    <div class="card-title" id="mapaCardTitle">Rutas en tránsito</div>
     <p id="mapaStatus" style="font-size:13px;color:#888;margin-bottom:14px">Cargando ruta real por calles de Neuquén…</p>
     <div id="mapa"></div>
   </div>
