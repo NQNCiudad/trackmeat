@@ -1498,13 +1498,7 @@
   }
 
   window.cerrarAdmin = function() {
-    // Volver al tab anterior o a "nuevo"
-    const tabs = ['nuevo','historial','mapa'];
-    const activo = tabs.find(function(t) {
-      return document.getElementById('tab-' + t) &&
-             document.getElementById('tab-' + t).classList.contains('active');
-    });
-    switchTab(activo || 'nuevo');
+    switchTab('registro');
   };
 
   window.abrirAdmin = function() {
@@ -2587,7 +2581,6 @@
   <button class="tab-btn" data-tab="recepcion" id="tabRecepcion" style="opacity:0.4;pointer-events:none">📥 Recepción</button>
   <button class="tab-btn" data-tab="historial">📊 Historial</button>
   <button class="tab-btn" data-tab="mapa">🗺️ Mapa</button>
-  <button class="tab-btn" data-tab="admin" id="tabBtnAdmin" style="margin-left:auto">⚙️ Admin</button>
 </nav>
 
 <!-- TAB: REGISTRO -->
@@ -2888,24 +2881,6 @@
       </div>
     </div>
     <button class="btn-primary" style="width:auto;padding:10px 24px;margin-top:4px" onclick="guardarNombreSistema()">Guardar identidad</button>
-  </div>
-
-  <div class="card">
-    <div class="card-title">🔀 Ruta activa</div>
-    <p style="font-size:13px;color:#888;margin-bottom:16px">Seleccioná qué sucursal envía y cuál recibe hoy. Afecta el mapa, el tracker y los nuevos registros.</p>
-    <div class="form-grid" style="grid-template-columns:1fr 1fr;gap:16px">
-      <div class="form-group" style="margin:0">
-        <label><span class="dot dot-out" style="display:inline-block;margin-right:4px"></span>Sucursal origen (envía)</label>
-        <select id="adminOrigenSel" class="desvio-select" onchange="actualizarRutaActiva()">
-        </select>
-      </div>
-      <div class="form-group" style="margin:0">
-        <label><span class="dot dot-in" style="display:inline-block;margin-right:4px"></span>Sucursal destino (recibe)</label>
-        <select id="adminDestinoSel" class="desvio-select" onchange="actualizarRutaActiva()">
-        </select>
-      </div>
-    </div>
-    <div id="rutaActivaPreview" style="margin-top:14px;padding:10px 14px;background:var(--surface2);border-radius:8px;border:1px solid var(--border);font-size:13px;display:flex;gap:12px;align-items:center;flex-wrap:wrap"></div>
   </div>
 
   <div class="card">
