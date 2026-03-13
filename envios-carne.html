@@ -5,7 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Control de Envíos — La Anónima</title>
 <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.6.0/jspdf.plugin.autotable.min.js"></script>
 
@@ -521,6 +522,7 @@
     }
     renderTabla();
     renderEnviosDia();
+    poblarFiltroSucursal();
     cargarEnviosLS();
   }
 
@@ -640,6 +642,12 @@
     btn.disabled = true;
     btn.textContent = 'Guardando…';
 
+    // Si es una recepción de envío en tránsito, editar la fila existente en Sheet
+    const envioActivo = window._envioActivoSeleccionado || window._envioEnCurso;
+    if (!editandoId && envioActivo && envioActivo.sheetId) {
+      editandoId = envioActivo.sheetId;
+    }
+
     try {
       let res;
       if (editandoId) {
@@ -717,43 +725,98 @@
   };
 
   window.exportarExcel = function() {
-    const filtrados = getEnviosFiltrados();
+    const filtrados = getEnviosFiltrados().filter(e => !!e.horaLlegada);
     if (!filtrados.length) { mostrarToast('No hay datos para exportar', 'warn'); return; }
 
-    const wb = XLSX.utils.book_new();
-    const rows = [
-      ['CONTROL DE ENVÍOS DE CARNE — ' + (localStorage.getItem('sys_empresa') || 'LA ANÓNIMA')],
-      ['Sucursal Origen: 225  →  Destino: 235'],
-      ['Generado:', new Date().toLocaleString('es-AR')],
-      [],
-      ['Fecha', 'Chofer', 'Patente', 'Hora Salida', 'Temp. Salida (°C)', 'Hora Llegada', 'Temp. Llegada (°C)', 'Duración', 'Desvíos', 'Observaciones']
-    ];
+    // Usar XLSXStyle si está disponible, si no fallback a XLSX normal
+    const XS = window.XLSXStyle || window.XLSX;
 
-    filtrados.forEach(e => {
+    const empresa = localStorage.getItem('sys_empresa') || 'LA ANÓNIMA';
+    const titulo = 'CONTROL DE ENVIOS DE CARNE — ' + empresa;
+    const generado = 'Generado: ' + new Date().toLocaleString('es-AR');
+
+    // Estilos
+    const stTitulo = { font: { bold: true, sz: 14, color: { rgb: 'FFFFFF' } }, fill: { fgColor: { rgb: '141414' } }, alignment: { horizontal: 'left', vertical: 'center' } };
+    const stSub    = { font: { sz: 10, color: { rgb: '888888' } }, fill: { fgColor: { rgb: '141414' } } };
+    const stHeader = { font: { bold: true, sz: 10, color: { rgb: 'FFFFFF' } }, fill: { fgColor: { rgb: 'E63946' } }, alignment: { horizontal: 'center', vertical: 'center' }, border: { bottom: { style: 'thin', color: { rgb: 'FFFFFF' } } } };
+    const stDataPar   = { fill: { fgColor: { rgb: 'F8F8F8' } }, font: { sz: 9 }, alignment: { vertical: 'center' } };
+    const stDataImpar = { fill: { fgColor: { rgb: 'FFFFFF' } }, font: { sz: 9 }, alignment: { vertical: 'center' } };
+    const stOK       = { font: { bold: true, sz: 9, color: { rgb: '2E7D32' } }, fill: { fgColor: { rgb: 'E8F5E9' } }, alignment: { horizontal: 'center' } };
+    const stRevisar  = { font: { bold: true, sz: 9, color: { rgb: 'B71C1C' } }, fill: { fgColor: { rgb: 'FFEBEE' } }, alignment: { horizontal: 'center' } };
+    const stTotal    = { font: { bold: true, sz: 10, color: { rgb: '141414' } }, fill: { fgColor: { rgb: 'F0F0F0' } } };
+    const stCentro   = (base) => Object.assign({}, base, { alignment: { horizontal: 'center', vertical: 'center' } });
+
+    const COLS = 12;
+    const HDR_ROW = 3; // 0-indexed: fila 4 en Excel
+
+    // Armar datos
+    const dataRows = filtrados.map((e, i) => {
       const dur = calcDuracion(e.horaSalida, e.horaLlegada);
-      rows.push([e.fecha, e.chofer, e.patente || '', e.horaSalida, parseFloat(e.tempSalida), e.horaLlegada, parseFloat(e.tempLlegada), dur, formatDesviosLabel(e.desvios), e.observaciones || '']);
+      const diffTemp = parseFloat(e.tempLlegada) - parseFloat(e.tempSalida);
+      const estado = isNaN(diffTemp) ? 'OK' : (Math.abs(diffTemp) > 2 ? 'Revisar' : 'OK');
+      const ruta = 'Suc.' + e.origenId + ' -> Suc.' + e.destinoId;
+      const base = i % 2 === 0 ? stDataPar : stDataImpar;
+      return [
+        { v: e.fecha,                      s: base },
+        { v: ruta,                         s: base },
+        { v: e.chofer,                     s: base },
+        { v: e.patente || '',              s: stCentro(base) },
+        { v: e.horaSalida,                 s: stCentro(base) },
+        { v: parseFloat(e.tempSalida),     s: stCentro(base) },
+        { v: e.horaLlegada,                s: stCentro(base) },
+        { v: parseFloat(e.tempLlegada),    s: stCentro(base) },
+        { v: dur,                          s: stCentro(base) },
+        { v: estado,                       s: estado === 'OK' ? stOK : stRevisar },
+        { v: formatDesviosPlain(e.desvios), s: base },
+        { v: textoPlano(e.observaciones),  s: base },
+      ];
     });
 
-    rows.push([]);
-    rows.push(['TOTALES', '', '', '', '', '', `${filtrados.length} envíos`, '']);
-
-    const ws = XLSX.utils.aoa_to_sheet(rows);
-
-    // Estilos básicos
-    ws['!cols'] = [12, 18, 12, 16, 12, 16, 12, 30].map(w => ({ wch: w }));
-    ws['!merges'] = [
-      { s: { r: 0, c: 0 }, e: { r: 0, c: 7 } },
-      { s: { r: 1, c: 0 }, e: { r: 1, c: 7 } },
+    const ws_data = [
+      // Fila 1: título (merge de toda la fila)
+      [{ v: titulo, s: stTitulo }, ...Array(COLS-1).fill({ v: '', s: stTitulo })],
+      // Fila 2: generado
+      [{ v: generado, s: stSub }, ...Array(COLS-1).fill({ v: '', s: stSub })],
+      // Fila 3: vacía
+      Array(COLS).fill({ v: '' }),
+      // Fila 4: headers
+      ['Fecha','Ruta','Chofer','Patente','Hora Sal.','Temp. Sal. (C)','Hora Lleg.','Temp. Lleg. (C)','Duracion','Estado','Desvios','Observaciones']
+        .map(h => ({ v: h, s: stHeader })),
+      // Datos
+      ...dataRows,
+      // Vacía
+      Array(COLS).fill({ v: '' }),
+      // Totales
+      [
+        { v: 'TOTAL: ' + filtrados.length + ' envios', s: stTotal },
+        ...Array(COLS-1).fill({ v: '', s: stTotal })
+      ]
     ];
 
-    XLSX.utils.book_append_sheet(wb, ws, 'Envíos');
-    XLSX.writeFile(wb, `envios_carne_${getFechaFiltro()}.xlsx`);
+    const ws = XS.utils.aoa_to_sheet(ws_data);
+
+    // Anchos de columna
+    ws['!cols'] = [12, 18, 14, 12, 11, 14, 11, 15, 11, 10, 22, 32].map(w => ({ wch: w }));
+
+    // Altura de filas
+    ws['!rows'] = [{ hpt: 28 }, { hpt: 16 }, { hpt: 8 }, { hpt: 22 }];
+
+    // Merges: título y subtítulo abarcan toda la fila
+    ws['!merges'] = [
+      { s: { r: 0, c: 0 }, e: { r: 0, c: COLS-1 } },
+      { s: { r: 1, c: 0 }, e: { r: 1, c: COLS-1 } },
+      { s: { r: ws_data.length-1, c: 0 }, e: { r: ws_data.length-1, c: COLS-1 } },
+    ];
+
+    const wb = XS.utils.book_new();
+    XS.utils.book_append_sheet(wb, ws, 'Envios');
+    XS.writeFile(wb, 'envios_carne_' + getFechaFiltro() + '.xlsx');
     mostrarToast('Excel exportado ✓', 'ok');
   };
 
   window.exportarPDF = function() {
     const { jsPDF } = window.jspdf;
-    const filtrados = getEnviosFiltrados();
+    const filtrados = getEnviosFiltrados().filter(e => !!e.horaLlegada);
     if (!filtrados.length) { mostrarToast('No hay datos para exportar', 'warn'); return; }
 
     const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
@@ -775,19 +838,21 @@
     // Tabla
     const rows = filtrados.map(e => {
       const dur = calcDuracion(e.horaSalida, e.horaLlegada);
-      const alertaTemp = (parseFloat(e.tempLlegada) - parseFloat(e.tempSalida)) > 2 ? '⚠️' : '✓';
-      return [e.fecha, e.chofer, e.patente || '', e.horaSalida, `${e.tempSalida}°C`, e.horaLlegada, `${e.tempLlegada}°C`, dur, alertaTemp, formatDesviosLabel(e.desvios), e.observaciones || '-'];
+      const diffTemp = parseFloat(e.tempLlegada) - parseFloat(e.tempSalida);
+      const estado = isNaN(diffTemp) ? 'OK' : (Math.abs(diffTemp) > 2 ? 'Revisar' : 'OK');
+      const ruta = 'Suc.' + e.origenId + ' -> Suc.' + e.destinoId;
+      return [e.fecha, ruta, e.chofer, e.patente || '', e.horaSalida, e.tempSalida + 'C', e.horaLlegada, e.tempLlegada + 'C', dur, estado, formatDesviosPlain(e.desvios), textoPlano(e.observaciones)];
     });
 
     doc.autoTable({
       startY: 30,
-      head: [['Fecha', 'Chofer', 'Patente', 'Salida', 'Temp. Sal.', 'Llegada', 'Temp. Lleg.', 'Duración', 'Estado', 'Desvíos', 'Observaciones']],
+      head: [['Fecha', 'Ruta', 'Chofer', 'Patente', 'Salida', 'Temp. Sal.', 'Llegada', 'Temp. Lleg.', 'Duración', 'Estado', 'Desvíos', 'Observaciones']],
       body: rows,
       theme: 'grid',
-      styles: { fontSize: 9, cellPadding: 3 },
+      styles: { fontSize: 8, cellPadding: 2 },
       headStyles: { fillColor: [230, 57, 70], textColor: 255, fontStyle: 'bold' },
       alternateRowStyles: { fillColor: [248, 248, 248] },
-      columnStyles: { 8: { cellWidth: 50 } }
+      columnStyles: { 9: { fontStyle: 'bold' } }
     });
 
     // Footer
@@ -800,13 +865,28 @@
     mostrarToast('PDF exportado ✓', 'ok');
   };
 
+  function poblarFiltroSucursal() {
+    const sel = document.getElementById('filtroSucursal');
+    if (!sel) return;
+    const valorActual = sel.value;
+    sel.innerHTML = '<option value="">Todas</option>';
+    Object.entries(SUCURSALES).forEach(([id, s]) => {
+      const opt = document.createElement('option');
+      opt.value = id;
+      opt.textContent = 'Suc. ' + id + ' — ' + (s.label || s.direccion || '');
+      sel.appendChild(opt);
+    });
+    sel.value = valorActual;
+  }
+
   function getEnviosFiltrados() {
     const desde = document.getElementById('filtroDesde').value;
     const hasta = document.getElementById('filtroHasta').value;
-    if (!desde && !hasta) return envios;
+    const suc   = document.getElementById('filtroSucursal') ? document.getElementById('filtroSucursal').value : '';
     return envios.filter(e => {
       if (desde && e.fecha < desde) return false;
       if (hasta && e.fecha > hasta) return false;
+      if (suc && e.origenId !== suc && e.destinoId !== suc) return false;
       return true;
     });
   }
@@ -829,7 +909,8 @@
   }
 
   function renderTabla() {
-    const filtrados = getEnviosFiltrados();
+    // Solo mostrar envíos completados (con horaLlegada) en el historial
+    const filtrados = getEnviosFiltrados().filter(e => !!e.horaLlegada);
     const tbody = document.getElementById('tbody');
     document.getElementById('totalEnvios').textContent = filtrados.length;
 
@@ -854,14 +935,6 @@
           <td>${dur}</td>
           <td>${alerta ? '<span class="status warn">⚠️ Revisar</span>' : '<span class="status ok">✓ OK</span>'}</td>
           <td>${renderDesviosBadges(e.desvios)}</td>
-          <td>
-            <div class="acciones">
-              ${e.fotoSalidaUrl ? `<button class="btn-icon" onclick="verFoto('${e.fotoSalidaUrl}')" title="Ver foto evidencia">📷</button>` : (e.sinFotoEvidencia ? '<span class="sin-foto-badge" title="Sin foto de evidencia">📷 Sin foto</span>' : '')}
-              ${e.fotoUrl ? `<button class="btn-icon" onclick="verFoto('${e.fotoUrl}')" title="Ver foto llegada">🖼️</button>` : ''}
-              <button class="btn-icon edit" onclick="editarEnvio('${e.id}')" title="Editar">✏️</button>
-              <button class="btn-icon del" onclick="eliminarEnvio('${e.id}')" title="Eliminar">🗑️</button>
-            </div>
-          </td>
         </tr>`;
     }).join('');
   }
@@ -1074,6 +1147,8 @@
   window.limpiarFiltro = function() {
     document.getElementById('filtroDesde').value = '';
     document.getElementById('filtroHasta').value = '';
+    const fs = document.getElementById('filtroSucursal');
+    if (fs) fs.value = '';
     renderTabla();
   };
 
@@ -1191,6 +1266,19 @@
   function formatDesviosLabel(desvios) {
     if (!desvios) return '—';
     return DESVIOS_LABELS[desvios] || desvios;
+  }
+
+  // Versión sin emojis para PDF/Excel
+  function formatDesviosPlain(desvios) {
+    if (!desvios) return '-';
+    const label = DESVIOS_LABELS[desvios] || desvios;
+    // Remover emojis y caracteres no-ASCII
+    return label.replace(/[^\x20-\x7E\xC0-\xFF]/g, '').trim() || desvios;
+  }
+
+  function textoPlano(str) {
+    if (!str) return '-';
+    return String(str).replace(/[^\x20-\x7E\xC0-\xFF]/g, '').trim() || '-';
   }
 
   function renderDesviosBadges(desvios) {
@@ -1541,7 +1629,7 @@
     document.getElementById('tabBtnAdmin').classList.add('active');
     document.getElementById('tab-admin').classList.add('active');
     renderAdminSucList();
-    poblarSelectsRuta();
+    renderAdminEnviosList();
     document.getElementById('adminEmpresa').value  = localStorage.getItem('sys_empresa') || 'LA ANÓNIMA';
     document.getElementById('adminSysNombre').value = localStorage.getItem('sys_nombre')  || 'Sistema de Entregas';
     document.getElementById('adminColor').value     = localStorage.getItem('sys_color')   || '#e63946';
@@ -1601,6 +1689,34 @@
     document.getElementById('adminPassConfirm').value = '';
     mostrarToast('Contraseña actualizada ✓', 'ok');
   };
+
+  function renderAdminEnviosList() {
+    const el = document.getElementById('adminEnviosList');
+    if (!el) return;
+    if (!envios.length) {
+      el.innerHTML = '<p style="color:#888;font-size:13px">Sin envíos registrados.</p>';
+      return;
+    }
+    el.innerHTML = envios.map(function(e) {
+      const oSuc = SUCURSALES[e.origenId] || {};
+      const dSuc = SUCURSALES[e.destinoId] || {};
+      const enTransito = !e.horaLlegada;
+      return '<div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:var(--surface2);border-radius:8px;margin-bottom:8px;gap:12px;flex-wrap:wrap">' +
+        '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">' +
+          '<span style="font-size:12px;color:#888">' + e.fecha + '</span>' +
+          '<span style="background:' + (oSuc.color||'#888') + ';color:#fff;padding:1px 7px;border-radius:3px;font-size:11px;font-weight:700">Suc. ' + e.origenId + '</span>' +
+          '<span style="color:#555;font-size:11px">→</span>' +
+          '<span style="background:' + (dSuc.color||'#888') + ';color:#fff;padding:1px 7px;border-radius:3px;font-size:11px;font-weight:700">Suc. ' + e.destinoId + '</span>' +
+          '<span style="font-size:12px;color:#ccc">' + e.chofer + ' · ' + e.patente + '</span>' +
+          (enTransito ? '<span style="background:#ff9800;color:#000;padding:1px 6px;border-radius:10px;font-size:10px;font-weight:700">EN TRÁNSITO</span>' : '') +
+        '</div>' +
+        '<div style="display:flex;gap:8px">' +
+          '<button class="btn-icon edit" onclick="editarEnvio(\'' + e.id + '\')" title="Editar">✏️</button>' +
+          '<button class="btn-icon del" onclick="eliminarEnvio(\'' + e.id + '\')" title="Eliminar">🗑️</button>' +
+        '</div>' +
+      '</div>';
+    }).join('');
+  }
 
   function renderAdminSucList() {
     const container = document.getElementById('adminSucList');
@@ -2759,6 +2875,12 @@
         <label>Hasta</label>
         <input type="date" id="filtroHasta">
       </div>
+      <div class="form-group">
+        <label>Sucursal</label>
+        <select id="filtroSucursal" class="desvio-select" style="min-width:160px">
+          <option value="">Todas</option>
+        </select>
+      </div>
       <div style="display:flex;gap:8px;align-items:flex-end">
         <button class="btn-secondary" onclick="aplicarFiltro()">Filtrar</button>
         <button class="btn-secondary" onclick="limpiarFiltro()">Ver todo</button>
@@ -2783,7 +2905,7 @@
             <th>Duración</th>
             <th>Estado</th>
             <th>Desvíos</th>
-            <th>Acciones</th>
+            
           </tr>
         </thead>
         <tbody id="tbody">
@@ -2881,6 +3003,12 @@
       </div>
     </div>
     <button class="btn-primary" style="width:auto;padding:10px 24px;margin-top:4px" onclick="guardarNombreSistema()">Guardar identidad</button>
+  </div>
+
+  <div class="card">
+    <div class="card-title">📋 Gestión de envíos</div>
+    <p style="font-size:13px;color:#888;margin-bottom:16px">Desde acá podés editar o eliminar cualquier envío registrado.</p>
+    <div id="adminEnviosList"></div>
   </div>
 
   <div class="card">
