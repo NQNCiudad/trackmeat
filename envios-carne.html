@@ -112,8 +112,8 @@
   }
 
   function cargarEnviosLS() {
-    // placeholder — la función real se define más abajo, después de renderEnviosEnTransito
-    setTimeout(sincronizarTransitoDesdeSheet, 0);
+    // Se llama desde cargarEnvios() cuando envios ya está poblado
+    if (window.sincronizarTransitoDesdeSheet) window.sincronizarTransitoDesdeSheet();
   }
 
   // Calcular distancia entre dos puntos [lat,lng] en km (Haversine)
@@ -1001,7 +1001,7 @@
     document.getElementById('tempLlegada').scrollIntoView({ behavior: 'smooth' });
   };
 
-    function sincronizarTransitoDesdeSheet() {
+    window.sincronizarTransitoDesdeSheet = function sincronizarTransitoDesdeSheet() {
     try {
       const hoy = new Date().toISOString().slice(0,10);
       const enTransito = envios.filter(function(e) {
