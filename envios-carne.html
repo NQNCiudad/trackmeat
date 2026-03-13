@@ -1004,10 +1004,12 @@
     window.sincronizarTransitoDesdeSheet = function sincronizarTransitoDesdeSheet() {
     try {
       const hoy = new Date().toISOString().slice(0,10);
+      console.log('[SYNC] hoy:', hoy, '| total envios:', envios.length);
       const enTransito = envios.filter(function(e) {
+        console.log('[SYNC] envio:', e.fecha, e.horaSalida, '|horaLlegada:|' + e.horaLlegada + '|');
         return e.fecha === hoy && e.horaSalida && !e.horaLlegada;
       });
-      if (!enTransito.length) return;
+      console.log('[SYNC] enTransito:', enTransito.length);
       const idsEnMemoria = (window._enviosEnCurso||[]).map(function(e){ return e.sheetId; });
       enTransito.forEach(function(e) {
         if (idsEnMemoria.includes(e.id)) return;
