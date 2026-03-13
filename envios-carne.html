@@ -99,6 +99,51 @@
   const rutasMulti = {};
   const COLORES_RUTA = ['#e63946','#2196f3','#ff9800','#9c27b0','#00bcd4','#4caf50'];
 
+  function guardarEnviosLS() {
+    try {
+      const data = (window._enviosEnCurso || []).map(function(e) {
+        // No guardar base64 de fotos (muy pesado)
+        return { fecha:e.fecha, chofer:e.chofer, patente:e.patente, origenId:e.origenId,
+                 destinoId:e.destinoId, horaSalida:e.horaSalida, tempSalida:e.tempSalida,
+                 sinFotoEvidencia:e.sinFotoEvidencia, sheetId:e.sheetId };
+      });
+      localStorage.setItem('tm_envios_transito', JSON.stringify(data));
+    } catch(e) { console.warn('No se pudo guardar en localStorage', e); }
+  }
+
+  function cargarEnviosLS() {
+    // Sincronizar envíos en tránsito desde Google Sheets (para compartir entre dispositivos)
+    // Se llama después de cargarEnvios(), así que `envios` ya está poblado
+    try {
+      const hoy = new Date().toISOString().slice(0,10);
+      // Envíos de hoy sin horaLlegada = en tránsito
+      const enTransito = envios.filter(function(e) {
+        return e.fecha === hoy && e.horaSalida && !e.horaLlegada;
+      });
+      if (!enTransito.length) return;
+      // Reconstruir _enviosEnCurso desde Sheet (no pisar los que ya están en memoria)
+      const idsEnMemoria = (window._enviosEnCurso||[]).map(function(e){ return e.sheetId; });
+      enTransito.forEach(function(e) {
+        if (idsEnMemoria.includes(e.id)) return; // ya está
+        const envio = {
+          fecha: e.fecha, chofer: e.chofer, patente: e.patente,
+          origenId: e.origenId, destinoId: e.destinoId,
+          horaSalida: e.horaSalida, tempSalida: e.tempSalida,
+          sinFotoEvidencia: e.sinFotoEvidencia, sheetId: e.id
+        };
+        window._enviosEnCurso = window._enviosEnCurso || [];
+        window._enviosEnCurso.push(envio);
+      });
+      if (window._enviosEnCurso && window._enviosEnCurso.length) {
+        window._envioEnCurso = window._enviosEnCurso[0];
+        if (!window._envioActivoSeleccionado) window._envioActivoSeleccionado = window._enviosEnCurso[0];
+        renderEnviosEnTransito();
+        const tabBtn = document.getElementById('tabRecepcion');
+        if (tabBtn) { tabBtn.style.opacity = '1'; tabBtn.style.pointerEvents = 'auto'; }
+      }
+    } catch(e) { console.warn('Error sincronizando tránsito desde Sheet', e); }
+  }
+
   // Calcular distancia entre dos puntos [lat,lng] en km (Haversine)
   function haversine(a, b) {
     const R = 6371;
@@ -318,12 +363,7 @@
 
       // Etiqueta de ruta
       const midIdx = Math.floor(coords.length / 2);
-      const labelIcon = L.divIcon({
-        className: '',
-        html: '<div style="background:' + color + ';color:#fff;padding:2px 7px;border-radius:10px;font-size:10px;font-weight:700;white-space:nowrap;box-shadow:0 1px 4px rgba(0,0,0,0.5)">' + envio.patente + '</div>',
-        iconAnchor: [20, 8]
-      });
-      const labelMarker = L.marker(coords[midIdx], { icon: labelIcon, interactive: false }).addTo(mapa);
+      const labelMarker = null; // sin etiqueta de patente
 
       // Ícono camión
       const camionIcon = L.divIcon({
@@ -421,10 +461,15 @@
     Object.entries(SUCURSALES).forEach(([id, s]) => {
       const icon = L.divIcon({
         className: '',
-        html: '<div style="background:' + s.color + ';border:2px solid rgba(255,255,255,0.8);border-radius:8px;padding:4px 8px;font-family:DM Sans,sans-serif;font-weight:700;font-size:12px;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,0.6);display:flex;align-items:center;gap:4px;color:#fff">' +
-              '🛒 ' + id +
+        html: '<div style="display:flex;flex-direction:column;align-items:center">' +
+              '<div style="background:' + s.color + ';border:3px solid #fff;border-radius:50%;width:44px;height:44px;box-shadow:0 3px 12px rgba(0,0,0,0.7);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:0px">' +
+              '<span style="font-size:14px;line-height:1">🛒</span>' +
+              '<span style="color:#fff;font-weight:800;font-size:11px;line-height:1;font-family:DM Sans,sans-serif">' + id + '</span>' +
+              '</div>' +
+              '<div style="width:3px;height:8px;background:' + s.color + ';margin-top:-1px"></div>' +
+              '<div style="width:6px;height:6px;background:' + s.color + ';border:2px solid #fff;border-radius:50%"></div>' +
               '</div>',
-        iconAnchor: [28, 14]
+        iconAnchor: [22, 60]
       });
       L.marker([s.lat, s.lng], { icon }).addTo(mapa);
     });
@@ -504,6 +549,7 @@
     }
     renderTabla();
     renderEnviosDia();
+    cargarEnviosLS();
   }
 
   window.guardarEnvio = async function() {
@@ -525,62 +571,70 @@
     const patente = ec ? ec.patente : '?';
 
     const sucReceptora = await new Promise(function(resolve) {
-      // Construir opciones de sucursales
-      const opcionesHTML = Object.entries(SUCURSALES).map(function([id, s]) {
-        return '<button onclick="window._sucSelModal='' + id + ''" style="background:' + s.color + ';color:#fff;border:none;border-radius:8px;padding:10px 18px;font-size:14px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:8px;width:100%">' +
-               '<span style="font-size:18px">🛒</span> Suc. ' + id + '</button>';
-      }).join('');
+      function mkDiv(css) { const d = document.createElement('div'); d.style.cssText = css; return d; }
+      function mkBtn(text, css) { const b = document.createElement('button'); b.innerHTML = text; b.style.cssText = css; return b; }
 
-      const modal = document.createElement('div');
-      modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px';
-      modal.innerHTML =
-        '<div style="background:#1a1a1a;border:1px solid #333;border-radius:16px;padding:28px;max-width:380px;width:100%">' +
-          '<div style="font-size:18px;font-weight:700;margin-bottom:6px;color:#fff">¿Desde qué sucursal confirmás?</div>' +
-          '<div style="color:#888;font-size:13px;margin-bottom:20px">Seleccioná tu sucursal para registrar la recepción</div>' +
-          '<div style="display:flex;flex-direction:column;gap:10px" id="modalSucBtns">' + opcionesHTML + '</div>' +
-          '<button onclick="window._sucSelModal=null;document.body.removeChild(this.closest('[style*=\"fixed\"]'))" style="margin-top:18px;background:transparent;border:1px solid #444;color:#888;border-radius:8px;padding:8px;width:100%;cursor:pointer;font-size:13px">Cancelar</button>' +
-        '</div>';
+      // ── Modal 1: elegir sucursal ──
+      const overlay = mkDiv('position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px');
+      const box = mkDiv('background:#1a1a1a;border:1px solid #333;border-radius:16px;padding:28px;max-width:380px;width:100%');
 
-      document.body.appendChild(modal);
+      const title = mkDiv('font-size:18px;font-weight:700;margin-bottom:6px;color:#fff'); title.textContent = '¿Desde qué sucursal confirmás?';
+      const sub = mkDiv('color:#888;font-size:13px;margin-bottom:20px'); sub.textContent = 'Seleccioná tu sucursal para registrar la recepción';
+      const btnWrap = mkDiv('display:flex;flex-direction:column;gap:10px');
 
-      // Listener para botones de sucursal
-      modal.querySelector('#modalSucBtns').addEventListener('click', function(e) {
-        const btn = e.target.closest('button[onclick]');
-        if (!btn) return;
-        btn.onclick && btn.onclick();
-        const selId = window._sucSelModal;
-        if (!selId) return;
-        document.body.removeChild(modal);
-
-        // Segundo modal: confirmación final
-        const oSuc = SUCURSALES[origenId] || {};
-        const dSuc = SUCURSALES[destinoId] || {};
-        const modal2 = document.createElement('div');
-        modal2.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px';
-        modal2.innerHTML =
-          '<div style="background:#1a1a1a;border:1px solid #333;border-radius:16px;padding:28px;max-width:380px;width:100%">' +
-            '<div style="font-size:18px;font-weight:700;margin-bottom:16px;color:#fff">⚠️ Confirmá la recepción</div>' +
-            '<div style="background:#111;border-radius:10px;padding:16px;margin-bottom:20px;display:flex;flex-direction:column;gap:10px;font-size:14px">' +
-              '<div style="display:flex;justify-content:space-between"><span style="color:#666">Ruta</span>' +
-              '<span><span style="background:' + (oSuc.color||'#888') + ';color:#fff;padding:2px 8px;border-radius:4px;font-weight:700;font-size:12px">Suc. ' + origenId + '</span>' +
-              ' → <span style="background:' + (dSuc.color||'#888') + ';color:#fff;padding:2px 8px;border-radius:4px;font-weight:700;font-size:12px">Suc. ' + destinoId + '</span></span></div>' +
-              '<div style="display:flex;justify-content:space-between"><span style="color:#666">Patente</span><span style="font-weight:700;color:#fff">' + patente + '</span></div>' +
-              '<div style="display:flex;justify-content:space-between"><span style="color:#666">Temp. llegada</span><span style="font-weight:700;color:#4caf50">' + tempLlegada + '°C</span></div>' +
-              '<div style="display:flex;justify-content:space-between;border-top:1px solid #333;padding-top:10px"><span style="color:#666">Confirma</span><span style="font-weight:700;color:#fff">Suc. ' + selId + '</span></div>' +
-            '</div>' +
-            (selId !== destinoId ? '<div style="background:rgba(255,152,0,0.12);border:1px solid #ff9800;border-radius:8px;padding:10px;color:#ff9800;font-size:12px;margin-bottom:16px">⚠️ La sucursal seleccionada (Suc. ' + selId + ') no coincide con el destino esperado (Suc. ' + destinoId + ')</div>' : '') +
-            '<div style="display:flex;gap:10px">' +
-              '<button id="modal2Cancel" style="flex:1;background:transparent;border:1px solid #444;color:#888;border-radius:8px;padding:10px;cursor:pointer;font-size:13px">Cancelar</button>' +
-              '<button id="modal2Ok" style="flex:2;background:#4caf50;border:none;color:#fff;border-radius:8px;padding:10px;cursor:pointer;font-size:14px;font-weight:700">✅ Confirmar recepción</button>' +
-            '</div>' +
-          '</div>';
-        document.body.appendChild(modal2);
-        modal2.querySelector('#modal2Cancel').onclick = function() { document.body.removeChild(modal2); resolve(null); };
-        modal2.querySelector('#modal2Ok').onclick = function() { document.body.removeChild(modal2); resolve(selId); };
+      Object.entries(SUCURSALES).forEach(function(entry) {
+        const id = entry[0], s = entry[1];
+        const btn = mkBtn('🛒 Suc. ' + id, 'background:' + s.color + ';color:#fff;border:none;border-radius:8px;padding:10px 18px;font-size:14px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:8px;width:100%;text-align:left');
+        btn.onclick = function() {
+          document.body.removeChild(overlay);
+          mostrarModal2(id);
+        };
+        btnWrap.appendChild(btn);
       });
 
-      // Cancelar
-      modal.querySelector('button:last-child').onclick = function() { document.body.removeChild(modal); resolve(null); };
+      const cancelBtn = mkBtn('Cancelar', 'margin-top:18px;background:transparent;border:1px solid #444;color:#888;border-radius:8px;padding:8px;width:100%;cursor:pointer;font-size:13px');
+      cancelBtn.onclick = function() { document.body.removeChild(overlay); resolve(null); };
+
+      box.appendChild(title); box.appendChild(sub); box.appendChild(btnWrap); box.appendChild(cancelBtn);
+      overlay.appendChild(box);
+      document.body.appendChild(overlay);
+
+      // ── Modal 2: confirmación final ──
+      function mostrarModal2(selId) {
+        const oSuc = SUCURSALES[origenId] || {};
+        const dSuc = SUCURSALES[destinoId] || {};
+        const ov2 = mkDiv('position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px');
+        const bx2 = mkDiv('background:#1a1a1a;border:1px solid #333;border-radius:16px;padding:28px;max-width:380px;width:100%');
+
+        const t2 = mkDiv('font-size:18px;font-weight:700;margin-bottom:16px;color:#fff'); t2.textContent = '⚠️ Confirmá la recepción';
+
+        const info = mkDiv('background:#111;border-radius:10px;padding:16px;margin-bottom:20px;display:flex;flex-direction:column;gap:10px;font-size:14px');
+        info.innerHTML =
+          '<div style="display:flex;justify-content:space-between"><span style="color:#666">Ruta</span>' +
+          '<span><span style="background:' + (oSuc.color||'#888') + ';color:#fff;padding:2px 8px;border-radius:4px;font-weight:700;font-size:12px">Suc. ' + origenId + '</span>' +
+          ' → <span style="background:' + (dSuc.color||'#888') + ';color:#fff;padding:2px 8px;border-radius:4px;font-weight:700;font-size:12px">Suc. ' + destinoId + '</span></span></div>' +
+          '<div style="display:flex;justify-content:space-between"><span style="color:#666">Patente</span><span style="font-weight:700;color:#fff">' + patente + '</span></div>' +
+          '<div style="display:flex;justify-content:space-between"><span style="color:#666">Temp. llegada</span><span style="font-weight:700;color:#4caf50">' + tempLlegada + '°C</span></div>' +
+          '<div style="display:flex;justify-content:space-between;border-top:1px solid #333;padding-top:10px"><span style="color:#666">Confirma</span><span style="font-weight:700;color:#fff">Suc. ' + selId + '</span></div>';
+
+        bx2.appendChild(t2); bx2.appendChild(info);
+
+        if (selId !== destinoId) {
+          const warn = mkDiv('background:rgba(255,152,0,0.12);border:1px solid #ff9800;border-radius:8px;padding:10px;color:#ff9800;font-size:12px;margin-bottom:16px');
+          warn.textContent = '⚠️ La sucursal seleccionada (Suc. ' + selId + ') no coincide con el destino esperado (Suc. ' + destinoId + ')';
+          bx2.appendChild(warn);
+        }
+
+        const btnRow = mkDiv('display:flex;gap:10px');
+        const cancelBtn2 = mkBtn('Cancelar', 'flex:1;background:transparent;border:1px solid #444;color:#888;border-radius:8px;padding:10px;cursor:pointer;font-size:13px');
+        const okBtn = mkBtn('✅ Confirmar recepción', 'flex:2;background:#4caf50;border:none;color:#fff;border-radius:8px;padding:10px;cursor:pointer;font-size:14px;font-weight:700');
+        cancelBtn2.onclick = function() { document.body.removeChild(ov2); resolve(null); };
+        okBtn.onclick = function() { document.body.removeChild(ov2); resolve(selId); };
+        btnRow.appendChild(cancelBtn2); btnRow.appendChild(okBtn);
+        bx2.appendChild(btnRow);
+        ov2.appendChild(bx2);
+        document.body.appendChild(ov2);
+      }
     });
 
     if (!sucReceptora) return;
@@ -640,6 +694,7 @@
       window._enviosEnCurso.shift();
     }
     window._envioEnCurso = window._enviosEnCurso && window._enviosEnCurso[0] || null;
+    guardarEnviosLS();
     window._fotoRecepcionBase64 = null;
     const selR = document.getElementById('sucReceptora');
     if (selR) selR.value = '';
@@ -1164,6 +1219,7 @@
 
   // Datos del envío en curso (pasados entre tabs)
   window._enviosEnCurso = window._enviosEnCurso || [];
+  // cargarEnviosLS se llama al final de cargarEnvios ahora
 
   window.registrarHoraSalida = function() {
     const temp = document.getElementById('tempSalida').value;
@@ -1196,6 +1252,7 @@
     window._enviosEnCurso = window._enviosEnCurso || [];
     window._enviosEnCurso.push(nuevoEnvio);
     window._envioEnCurso = nuevoEnvio; // compat
+    guardarEnviosLS();
     window._fotoSalidaBase64 = fotoBase64 || null;
     window._salidaSinFoto = !fotoBase64;
 
