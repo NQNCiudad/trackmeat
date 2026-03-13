@@ -112,36 +112,8 @@
   }
 
   function cargarEnviosLS() {
-    // Sincronizar envíos en tránsito desde Google Sheets (para compartir entre dispositivos)
-    // Se llama después de cargarEnvios(), así que `envios` ya está poblado
-    try {
-      const hoy = new Date().toISOString().slice(0,10);
-      // Envíos de hoy sin horaLlegada = en tránsito
-      const enTransito = envios.filter(function(e) {
-        return e.fecha === hoy && e.horaSalida && !e.horaLlegada;
-      });
-      if (!enTransito.length) return;
-      // Reconstruir _enviosEnCurso desde Sheet (no pisar los que ya están en memoria)
-      const idsEnMemoria = (window._enviosEnCurso||[]).map(function(e){ return e.sheetId; });
-      enTransito.forEach(function(e) {
-        if (idsEnMemoria.includes(e.id)) return; // ya está
-        const envio = {
-          fecha: e.fecha, chofer: e.chofer, patente: e.patente,
-          origenId: e.origenId, destinoId: e.destinoId,
-          horaSalida: e.horaSalida, tempSalida: e.tempSalida,
-          sinFotoEvidencia: e.sinFotoEvidencia, sheetId: e.id
-        };
-        window._enviosEnCurso = window._enviosEnCurso || [];
-        window._enviosEnCurso.push(envio);
-      });
-      if (window._enviosEnCurso && window._enviosEnCurso.length) {
-        window._envioEnCurso = window._enviosEnCurso[0];
-        if (!window._envioActivoSeleccionado) window._envioActivoSeleccionado = window._enviosEnCurso[0];
-        renderEnviosEnTransito();
-        const tabBtn = document.getElementById('tabRecepcion');
-        if (tabBtn) { tabBtn.style.opacity = '1'; tabBtn.style.pointerEvents = 'auto'; }
-      }
-    } catch(e) { console.warn('Error sincronizando tránsito desde Sheet', e); }
+    // placeholder — la función real se define más abajo, después de renderEnviosEnTransito
+    setTimeout(sincronizarTransitoDesdeSheet, 0);
   }
 
   // Calcular distancia entre dos puntos [lat,lng] en km (Haversine)
@@ -1028,6 +1000,35 @@
     // Scroll al formulario
     document.getElementById('tempLlegada').scrollIntoView({ behavior: 'smooth' });
   };
+
+    function sincronizarTransitoDesdeSheet() {
+    try {
+      const hoy = new Date().toISOString().slice(0,10);
+      const enTransito = envios.filter(function(e) {
+        return e.fecha === hoy && e.horaSalida && !e.horaLlegada;
+      });
+      if (!enTransito.length) return;
+      const idsEnMemoria = (window._enviosEnCurso||[]).map(function(e){ return e.sheetId; });
+      enTransito.forEach(function(e) {
+        if (idsEnMemoria.includes(e.id)) return;
+        const envio = {
+          fecha: e.fecha, chofer: e.chofer, patente: e.patente,
+          origenId: e.origenId, destinoId: e.destinoId,
+          horaSalida: e.horaSalida, tempSalida: e.tempSalida,
+          sinFotoEvidencia: e.sinFotoEvidencia, sheetId: e.id
+        };
+        window._enviosEnCurso = window._enviosEnCurso || [];
+        window._enviosEnCurso.push(envio);
+      });
+      if (window._enviosEnCurso && window._enviosEnCurso.length) {
+        window._envioEnCurso = window._enviosEnCurso[0];
+        if (!window._envioActivoSeleccionado) window._envioActivoSeleccionado = window._enviosEnCurso[0];
+        renderEnviosEnTransito();
+        const tabBtn = document.getElementById('tabRecepcion');
+        if (tabBtn) { tabBtn.style.opacity = '1'; tabBtn.style.pointerEvents = 'auto'; }
+      }
+    } catch(e) { console.warn('Error sincronizando tránsito desde Sheet', e); }
+  }
 
     window.toggleAcordeon = function(idx) {
     const body = document.getElementById('body_' + idx);
