@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Control de Envíos — La Anónima</title>
 <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
-<script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.6.0/jspdf.plugin.autotable.min.js"></script>
@@ -524,6 +524,7 @@
     renderEnviosDia();
     poblarFiltroSucursal();
     cargarEnviosLS();
+    if (window._splashRemove) window._splashRemove();
   }
 
   window.guardarEnvio = async function() {
@@ -736,14 +737,27 @@
     const generado = 'Generado: ' + new Date().toLocaleString('es-AR');
 
     // Estilos
-    const stTitulo = { font: { bold: true, sz: 14, color: { rgb: 'FFFFFF' } }, fill: { fgColor: { rgb: '141414' } }, alignment: { horizontal: 'left', vertical: 'center' } };
-    const stSub    = { font: { sz: 10, color: { rgb: '888888' } }, fill: { fgColor: { rgb: '141414' } } };
-    const stHeader = { font: { bold: true, sz: 10, color: { rgb: 'FFFFFF' } }, fill: { fgColor: { rgb: 'E63946' } }, alignment: { horizontal: 'center', vertical: 'center' }, border: { bottom: { style: 'thin', color: { rgb: 'FFFFFF' } } } };
-    const stDataPar   = { fill: { fgColor: { rgb: 'F8F8F8' } }, font: { sz: 9 }, alignment: { vertical: 'center' } };
-    const stDataImpar = { fill: { fgColor: { rgb: 'FFFFFF' } }, font: { sz: 9 }, alignment: { vertical: 'center' } };
-    const stOK       = { font: { bold: true, sz: 9, color: { rgb: '2E7D32' } }, fill: { fgColor: { rgb: 'E8F5E9' } }, alignment: { horizontal: 'center' } };
-    const stRevisar  = { font: { bold: true, sz: 9, color: { rgb: 'B71C1C' } }, fill: { fgColor: { rgb: 'FFEBEE' } }, alignment: { horizontal: 'center' } };
-    const stTotal    = { font: { bold: true, sz: 10, color: { rgb: '141414' } }, fill: { fgColor: { rgb: 'F0F0F0' } } };
+    const BG1    = '1C1C1C';  // fila par  — gris muy oscuro
+    const BG2    = '242424';  // fila impar
+    const BGHDR  = '0C0C0C';  // header tabla
+    const BGTIT  = '0C0C0C';  // título
+    const TXT    = 'DCDCDC';  // texto normal
+    const TXTSUB = '888888';  // texto secundario
+    const BORD   = { style: 'thin', color: { rgb: '2D2D2D' } };
+    const bordes = { top: BORD, bottom: BORD, left: BORD, right: BORD };
+
+    const stTitulo = { font: { bold: true, sz: 14, color: { rgb: 'FFFFFF' } }, fill: { fgColor: { rgb: BGTIT } }, alignment: { horizontal: 'left', vertical: 'center' } };
+    const stSub    = { font: { sz: 9,  color: { rgb: TXTSUB } }, fill: { fgColor: { rgb: BGTIT } } };
+    const stHeader = { font: { bold: true, sz: 9, color: { rgb: TXTSUB } }, fill: { fgColor: { rgb: BGHDR } }, alignment: { horizontal: 'center', vertical: 'center' }, border: bordes };
+    const stDataPar   = { fill: { fgColor: { rgb: BG1 } }, font: { sz: 9, color: { rgb: TXT } }, border: bordes, alignment: { vertical: 'center' } };
+    const stDataImpar = { fill: { fgColor: { rgb: BG2 } }, font: { sz: 9, color: { rgb: TXT } }, border: bordes, alignment: { vertical: 'center' } };
+    const stSalida   = (base) => Object.assign({}, base, { font: { sz: 9, bold: false, color: { rgb: 'E63946' } }, alignment: { horizontal: 'center', vertical: 'center' } });
+    const stLlegada  = (base) => Object.assign({}, base, { font: { sz: 9, bold: false, color: { rgb: '2196F3' } }, alignment: { horizontal: 'center', vertical: 'center' } });
+    const stTemp     = (base) => Object.assign({}, base, { font: { sz: 9, bold: false, color: { rgb: 'FF9800' } }, alignment: { horizontal: 'center', vertical: 'center' } });
+    const stTempMal  = (base) => Object.assign({}, base, { font: { sz: 9, bold: true,  color: { rgb: 'F44336' } }, alignment: { horizontal: 'center', vertical: 'center' } });
+    const stOK       = { font: { bold: true, sz: 9, color: { rgb: '4CAF50' } }, fill: { fgColor: { rgb: '142814' } }, alignment: { horizontal: 'center' }, border: bordes };
+    const stRevisar  = { font: { bold: true, sz: 9, color: { rgb: 'F44336' } }, fill: { fgColor: { rgb: '321414' } }, alignment: { horizontal: 'center' }, border: bordes };
+    const stTotal    = { font: { bold: true, sz: 10, color: { rgb: 'FFFFFF' } }, fill: { fgColor: { rgb: '0C0C0C' } } };
     const stCentro   = (base) => Object.assign({}, base, { alignment: { horizontal: 'center', vertical: 'center' } });
 
     const COLS = 12;
@@ -753,22 +767,23 @@
     const dataRows = filtrados.map((e, i) => {
       const dur = calcDuracion(e.horaSalida, e.horaLlegada);
       const diffTemp = parseFloat(e.tempLlegada) - parseFloat(e.tempSalida);
-      const estado = isNaN(diffTemp) ? 'OK' : (Math.abs(diffTemp) > 2 ? 'Revisar' : 'OK');
+      const esRevisar = !isNaN(diffTemp) && Math.abs(diffTemp) > 2;
+      const estado = esRevisar ? 'Revisar' : 'OK';
       const ruta = 'Suc.' + e.origenId + ' -> Suc.' + e.destinoId;
       const base = i % 2 === 0 ? stDataPar : stDataImpar;
       return [
-        { v: e.fecha,                      s: base },
-        { v: ruta,                         s: base },
-        { v: e.chofer,                     s: base },
-        { v: e.patente || '',              s: stCentro(base) },
-        { v: e.horaSalida,                 s: stCentro(base) },
-        { v: parseFloat(e.tempSalida),     s: stCentro(base) },
-        { v: e.horaLlegada,                s: stCentro(base) },
-        { v: parseFloat(e.tempLlegada),    s: stCentro(base) },
-        { v: dur,                          s: stCentro(base) },
-        { v: estado,                       s: estado === 'OK' ? stOK : stRevisar },
+        { v: e.fecha,                       s: base },
+        { v: ruta,                          s: base },
+        { v: e.chofer,                      s: base },
+        { v: e.patente || '',               s: stCentro(base) },
+        { v: e.horaSalida,                  s: stSalida(base) },
+        { v: e.tempSalida + 'C',            s: stTemp(base) },
+        { v: e.horaLlegada,                 s: stLlegada(base) },
+        { v: e.tempLlegada + 'C',           s: esRevisar ? stTempMal(base) : stTemp(base) },
+        { v: dur,                           s: stCentro(base) },
+        { v: estado,                        s: esRevisar ? stRevisar : stOK },
         { v: formatDesviosPlain(e.desvios), s: base },
-        { v: textoPlano(e.observaciones),  s: base },
+        { v: textoPlano(e.observaciones),   s: base },
       ];
     });
 
@@ -820,48 +835,113 @@
     if (!filtrados.length) { mostrarToast('No hay datos para exportar', 'warn'); return; }
 
     const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
-
-    // Header
-    doc.setFillColor(20, 20, 20);
-    doc.rect(0, 0, 297, 25, 'F');
-    doc.setTextColor(255, 255, 255);
-    doc.setFontSize(16);
-    doc.setFont('helvetica', 'bold');
-    doc.text('CONTROL DE ENVÍOS DE CARNE', 14, 12);
-    doc.setFontSize(10);
-    doc.setFont('helvetica', 'normal');
-    const empNombre = localStorage.getItem('sys_empresa') || 'La Anónima S.A.';
+    const W = 297, pgH = doc.internal.pageSize.height;
+    const empNombre = localStorage.getItem('sys_empresa') || 'La Anonima S.A.';
     const subNombre = localStorage.getItem('sys_nombre') || 'Sistema de Entregas';
-    doc.text(empNombre + ' — ' + subNombre, 14, 20);
-    doc.text(`Generado: ${new Date().toLocaleString('es-AR')}`, 220, 20);
 
-    // Tabla
+    // ── Fondo total oscuro ──
+    doc.setFillColor(18, 18, 18);
+    doc.rect(0, 0, W, pgH, 'F');
+
+    // ── Header ──
+    doc.setFillColor(12, 12, 12);
+    doc.rect(0, 0, W, 22, 'F');
+    // Acento rojo izquierda
+    doc.setFillColor(230, 57, 70);
+    doc.rect(0, 0, 4, 22, 'F');
+    doc.setTextColor(255, 255, 255);
+    doc.setFontSize(13);
+    doc.setFont('helvetica', 'bold');
+    doc.text('CONTROL DE ENVIOS DE CARNE', 10, 10);
+    doc.setFontSize(8);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(150, 150, 150);
+    doc.text(empNombre + ' — ' + subNombre, 10, 17);
+    doc.text('Generado: ' + new Date().toLocaleString('es-AR'), W - 10, 17, { align: 'right' });
+
+    // ── Tabla ──
     const rows = filtrados.map(e => {
       const dur = calcDuracion(e.horaSalida, e.horaLlegada);
       const diffTemp = parseFloat(e.tempLlegada) - parseFloat(e.tempSalida);
-      const estado = isNaN(diffTemp) ? 'OK' : (Math.abs(diffTemp) > 2 ? 'Revisar' : 'OK');
+      const esRevisar = !isNaN(diffTemp) && Math.abs(diffTemp) > 2;
+      const estado = esRevisar ? 'Revisar' : 'OK';
       const ruta = 'Suc.' + e.origenId + ' -> Suc.' + e.destinoId;
-      return [e.fecha, ruta, e.chofer, e.patente || '', e.horaSalida, e.tempSalida + 'C', e.horaLlegada, e.tempLlegada + 'C', dur, estado, formatDesviosPlain(e.desvios), textoPlano(e.observaciones)];
+      return {
+        cells: [e.fecha, ruta, e.chofer, e.patente || '', e.horaSalida, e.tempSalida + 'C', e.horaLlegada, e.tempLlegada + 'C', dur, estado, formatDesviosPlain(e.desvios), textoPlano(e.observaciones)],
+        esRevisar
+      };
     });
 
     doc.autoTable({
-      startY: 30,
-      head: [['Fecha', 'Ruta', 'Chofer', 'Patente', 'Salida', 'Temp. Sal.', 'Llegada', 'Temp. Lleg.', 'Duración', 'Estado', 'Desvíos', 'Observaciones']],
-      body: rows,
-      theme: 'grid',
-      styles: { fontSize: 8, cellPadding: 2 },
-      headStyles: { fillColor: [230, 57, 70], textColor: 255, fontStyle: 'bold' },
-      alternateRowStyles: { fillColor: [248, 248, 248] },
-      columnStyles: { 9: { fontStyle: 'bold' } }
+      startY: 26,
+      head: [['Fecha','Ruta','Chofer','Patente','Salida','Temp.Sal.','Llegada','Temp.Lleg.','Duracion','Estado','Desvios','Observaciones']],
+      body: rows.map(r => r.cells),
+      theme: 'plain',
+      styles: {
+        fontSize: 7.5,
+        cellPadding: { top: 3, bottom: 3, left: 3, right: 3 },
+        textColor: [220, 220, 220],
+        fillColor: [28, 28, 28],
+        lineColor: [45, 45, 45],
+        lineWidth: 0.3,
+        font: 'helvetica'
+      },
+      headStyles: {
+        fillColor: [35, 35, 35],
+        textColor: [150, 150, 150],
+        fontStyle: 'bold',
+        fontSize: 7,
+        lineColor: [60, 60, 60],
+        lineWidth: 0.3
+      },
+      alternateRowStyles: {
+        fillColor: [33, 33, 33]
+      },
+      columnStyles: {
+        0: { cellWidth: 22 },
+        1: { cellWidth: 26 },
+        2: { cellWidth: 20 },
+        3: { cellWidth: 18, halign: 'center' },
+        4: { cellWidth: 16, halign: 'center', textColor: [230, 57, 70] },
+        5: { cellWidth: 18, halign: 'center', textColor: [255, 152, 0] },
+        6: { cellWidth: 16, halign: 'center', textColor: [33, 150, 243] },
+        7: { cellWidth: 20, halign: 'center', textColor: [255, 152, 0] },
+        8: { cellWidth: 16, halign: 'center' },
+        9: { cellWidth: 16, halign: 'center', fontStyle: 'bold' },
+        10: { cellWidth: 34 },
+        11: { cellWidth: 'auto' }
+      },
+      didParseCell: function(data) {
+        if (data.section === 'body' && data.column.index === 9) {
+          const esRev = rows[data.row.index] && rows[data.row.index].esRevisar;
+          if (esRev) {
+            data.cell.styles.textColor = [244, 67, 54];
+            data.cell.styles.fillColor = [50, 20, 20];
+          } else {
+            data.cell.styles.textColor = [76, 175, 80];
+            data.cell.styles.fillColor = [20, 40, 20];
+          }
+        }
+        // Temp. sal roja si muy baja
+        if (data.section === 'body' && data.column.index === 5) {
+          data.cell.styles.textColor = [255, 152, 0];
+        }
+        if (data.section === 'body' && data.column.index === 7) {
+          const diff = parseFloat(filtrados[data.row.index]?.tempLlegada) - parseFloat(filtrados[data.row.index]?.tempSalida);
+          data.cell.styles.textColor = (!isNaN(diff) && Math.abs(diff) > 2) ? [244, 67, 54] : [255, 152, 0];
+        }
+      }
     });
 
-    // Footer
-    const pageH = doc.internal.pageSize.height;
-    doc.setFontSize(8);
-    doc.setTextColor(150);
-    doc.text(`Total: ${filtrados.length} envíos`, 14, pageH - 8);
+    // ── Footer ──
+    doc.setFillColor(12, 12, 12);
+    doc.rect(0, pgH - 10, W, 10, 'F');
+    doc.setFontSize(7.5);
+    doc.setTextColor(100, 100, 100);
+    doc.text('Total: ' + filtrados.length + ' envios completados', 10, pgH - 4);
+    doc.text(empNombre, W - 10, pgH - 4, { align: 'right' });
 
-    doc.save(`envios_carne_${getFechaFiltro()}.pdf`);
+    doc.save('envios_carne_' + getFechaFiltro() + '.pdf');
     mostrarToast('PDF exportado ✓', 'ok');
   };
 
@@ -1384,6 +1464,9 @@
 
     mostrarToast('Salida registrada — completá la recepción en destino 📥', 'ok');
 
+    // Notificación WhatsApp al destino
+    setTimeout(function() { mostrarModalWhatsApp(nuevoEnvio); }, 600);
+
     // Mapa: resetear y redibujar con la ruta del envío en curso
     if (mapa) {
       borrarRuta();
@@ -1396,6 +1479,75 @@
     }
     actualizarTracker();
   };
+
+  function mostrarModalWhatsApp(envio) {
+    const dSuc = SUCURSALES[envio.destinoId] || {};
+    const oSuc = SUCURSALES[envio.origenId] || {};
+    const tel = dSuc.tel || '';
+
+    const textoMensaje =
+      '🚚 *Salida confirmada* — Suc. ' + envio.origenId + '\n' +
+      '👤 Chofer: ' + envio.chofer.trim() + ' | 🚗 ' + envio.patente.trim() + '\n' +
+      '🕐 Hora: ' + envio.horaSalida + ' | 🌡️ ' + envio.tempSalida + '°C\n' +
+      '📍 Destino: Suc. ' + envio.destinoId + ' — ' + (dSuc.direccion || '').trim() + '\n\n' +
+      '⚠️ *NO OLVIDAR RECEPCIONAR* ⚠️';
+
+    const mensaje = encodeURIComponent(textoMensaje);
+
+    const textoPlanoWA =
+      'SALIDA CONFIRMADA - Suc. ' + envio.origenId + '\n' +
+      'Chofer: ' + envio.chofer.trim() + ' | Patente: ' + envio.patente.trim() + '\n' +
+      'Hora: ' + envio.horaSalida + ' | Temp: ' + envio.tempSalida + 'C\n' +
+      'Destino: Suc. ' + envio.destinoId + ' - ' + (dSuc.direccion || '').trim() + '\n\n' +
+      '>> NO OLVIDAR RECEPCIONAR <<';
+
+    const urlWA = tel
+      ? 'https://wa.me/549' + tel + '?text=' + encodeURIComponent(textoPlanoWA)
+      : 'https://wa.me/?text=' + encodeURIComponent(textoPlanoWA);
+
+    // Crear modal
+    const overlay = document.createElement('div');
+    overlay.id = 'modalWA';
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px';
+
+    overlay.innerHTML =
+      '<div style="background:#1c1c1c;border:1px solid #2d2d2d;border-radius:16px;padding:28px;max-width:400px;width:100%;text-align:center">' +
+        '<div style="font-size:48px;margin-bottom:12px">📱</div>' +
+        '<div style="font-size:17px;font-weight:700;color:#fff;margin-bottom:8px">Notificar por WhatsApp</div>' +
+        '<div style="font-size:13px;color:#888;margin-bottom:20px">Avisá al gerente de Suc. ' + envio.destinoId + ' que el envío está en camino</div>' +
+        '<div style="background:#0d2a0d;border:1px solid #1a5c1a;border-radius:10px;padding:14px;text-align:left;font-size:12px;color:#a5d6a7;margin-bottom:20px;line-height:1.7">' +
+          '🚚 <b>Salida confirmada</b> — Suc. ' + envio.origenId + '<br>' +
+          '👤 Chofer: ' + envio.chofer + ' | 🚗 ' + envio.patente + '<br>' +
+          '🕐 Hora: ' + envio.horaSalida + ' | 🌡️ ' + envio.tempSalida + '°C<br>' +
+          '📍 Destino: Suc. ' + envio.destinoId + ' — ' + (dSuc.direccion||'') + '<br><br>' +
+          '<span style="color:#ff5252;font-weight:700;font-size:13px">⚠️ NO OLVIDAR RECEPCIONAR ⚠️</span>' +
+        '</div>' +
+        (tel
+          ? '<div style="font-size:12px;color:#888;margin-bottom:16px">📞 Enviando a: <b style="color:#4caf50">+549 ' + tel + '</b></div>'
+          : '<div style="font-size:12px;color:#ff9800;margin-bottom:16px">⚠️ No hay teléfono cargado para Suc. ' + envio.destinoId + '. Podés enviarlo manualmente.</div>') +
+        '<div style="display:flex;gap:10px;justify-content:center">' +
+          '<button id="btnEnviarWA" ' +
+            'style="display:inline-flex;align-items:center;gap:8px;background:#25D366;color:#fff;font-weight:700;font-size:14px;padding:12px 24px;border-radius:10px;border:none;cursor:pointer">'+
+            '<svg width="20" height="20" viewBox="0 0 24 24" fill="white"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/></svg>' +
+            'Copiar y abrir WhatsApp</button>' +
+          '<button onclick="document.getElementById(\'modalWA\').remove()" ' +
+            'style="background:transparent;border:1px solid #444;color:#888;font-size:13px;padding:12px 20px;border-radius:10px;cursor:pointer">Omitir</button>' +
+        '</div>' +
+      '</div>';
+
+    document.body.appendChild(overlay);
+    overlay.addEventListener('click', function(e) { if (e.target === overlay) overlay.remove(); });
+
+    // Asignar handler al botón después de insertarlo en el DOM
+    const btnWA = document.getElementById('btnEnviarWA');
+    if (btnWA) {
+      btnWA.addEventListener('click', function() {
+        navigator.clipboard.writeText(textoMensaje).catch(function(){});
+        overlay.remove();
+        window.open(urlWA, '_blank');
+      });
+    }
+  }
 
   function resetFormSalida() {
     document.getElementById('fecha').valueAsDate = new Date();
@@ -1626,7 +1778,8 @@
     document.getElementById('adminPassInput').value = '';
     document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
     document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-    document.getElementById('tabBtnAdmin').classList.add('active');
+    const tabBtnAdm = document.getElementById('tabBtnAdmin');
+    if (tabBtnAdm) tabBtnAdm.classList.add('active');
     document.getElementById('tab-admin').classList.add('active');
     renderAdminSucList();
     renderAdminEnviosList();
@@ -1759,6 +1912,7 @@
       document.getElementById('aSucLng').value = s.lng;
       document.getElementById('aSucColor').value = s.color;
       document.getElementById('aSucRol').value = s.rol || 'origen';
+      document.getElementById('aSucTel').value = s.tel || '';
     } else {
       document.getElementById('aSucId').value = '';
       document.getElementById('aSucId').disabled = false;
@@ -1767,6 +1921,7 @@
       document.getElementById('aSucLng').value = '';
       document.getElementById('aSucColor').value = '#e63946';
       document.getElementById('aSucRol').value = 'origen';
+      document.getElementById('aSucTel').value = '';
     }
   };
 
@@ -1782,13 +1937,14 @@
     const lng = parseFloat(document.getElementById('aSucLng').value);
     const color = document.getElementById('aSucColor').value;
     const rol = document.getElementById('aSucRol').value;
+    const tel = document.getElementById('aSucTel').value.trim().replace(/\D/g,'');
     if (!id || !dir || isNaN(lat) || isNaN(lng)) {
       mostrarToast('Completá todos los campos obligatorios ⚠️', 'warn'); return;
     }
     if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
       mostrarToast('Coordenadas inválidas ⚠️', 'warn'); return;
     }
-    SUCURSALES[id] = { lat, lng, label: 'Suc. ' + id + ' — ' + dir, direccion: dir, color, rol };
+    SUCURSALES[id] = { lat, lng, label: 'Suc. ' + id + ' — ' + dir, direccion: dir, color, rol, tel };
     guardarConfigSucursales(SUCURSALES);
     cerrarFormSucursal();
     renderAdminSucList();
@@ -2680,6 +2836,194 @@
 </head>
 <body>
 
+<!-- SPLASH SCREEN -->
+<div id="splashScreen" style="
+  position:fixed;inset:0;z-index:99999;
+  background:#0a0a0a;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  gap:0;overflow:hidden;
+">
+  <!-- Fondo animado con líneas de ruta -->
+  <canvas id="splashCanvas" style="position:absolute;inset:0;opacity:0.15"></canvas>
+
+  <!-- Logo -->
+  <div id="splashLogo" style="position:relative;text-align:center;opacity:0;transform:translateY(20px);transition:all 0.8s cubic-bezier(.22,1,.36,1)">
+    <div style="font-family:'Bebas Neue',sans-serif;font-size:clamp(38px,8vw,64px);letter-spacing:4px;line-height:1" id="splashEmpresa">
+      <span style="color:#fff">LA </span><span style="color:#e63946">ANÓNIMA</span>
+    </div>
+    <div style="font-family:'DM Sans',sans-serif;font-size:clamp(10px,2vw,13px);letter-spacing:6px;color:#555;text-transform:uppercase;margin-top:4px" id="splashSubtitulo">Sistema de Entregas</div>
+  </div>
+
+  <!-- Icono camión animado -->
+  <div id="splashTruck" style="position:relative;margin-top:48px;opacity:0;transition:opacity 0.6s ease 0.4s">
+    <svg width="80" height="48" viewBox="0 0 80 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <rect x="2" y="10" width="46" height="28" rx="3" fill="#1a1a1a" stroke="#e63946" stroke-width="1.5"/>
+      <path d="M48 18h14l10 10v10H48V18z" fill="#1a1a1a" stroke="#e63946" stroke-width="1.5"/>
+      <circle cx="16" cy="40" r="6" fill="#0a0a0a" stroke="#e63946" stroke-width="2"/>
+      <circle cx="16" cy="40" r="2" fill="#e63946"/>
+      <circle cx="60" cy="40" r="6" fill="#0a0a0a" stroke="#e63946" stroke-width="2"/>
+      <circle cx="60" cy="40" r="2" fill="#e63946"/>
+      <rect x="52" y="20" width="8" height="8" rx="1" fill="#2196f3" opacity="0.7"/>
+    </svg>
+    <!-- Línea de ruta bajo el camión -->
+    <div style="margin-top:8px;width:80px;height:2px;background:linear-gradient(90deg,transparent,#e63946,transparent);border-radius:2px"></div>
+  </div>
+
+  <!-- Pasos de carga -->
+  <div id="splashSteps" style="margin-top:40px;display:flex;flex-direction:column;gap:10px;min-width:220px;opacity:0;transition:opacity 0.5s ease 0.6s">
+    <div class="splash-step" id="step1" style="display:flex;align-items:center;gap:10px;opacity:0.3">
+      <div class="step-dot" style="width:8px;height:8px;border-radius:50%;background:#333;flex-shrink:0;transition:all 0.4s"></div>
+      <span style="font-family:'DM Sans',sans-serif;font-size:12px;color:#555;letter-spacing:1px">Conectando con el servidor...</span>
+    </div>
+    <div class="splash-step" id="step2" style="display:flex;align-items:center;gap:10px;opacity:0.3">
+      <div class="step-dot" style="width:8px;height:8px;border-radius:50%;background:#333;flex-shrink:0;transition:all 0.4s"></div>
+      <span style="font-family:'DM Sans',sans-serif;font-size:12px;color:#555;letter-spacing:1px">Cargando historial de envíos...</span>
+    </div>
+    <div class="splash-step" id="step3" style="display:flex;align-items:center;gap:10px;opacity:0.3">
+      <div class="step-dot" style="width:8px;height:8px;border-radius:50%;background:#333;flex-shrink:0;transition:all 0.4s"></div>
+      <span style="font-family:'DM Sans',sans-serif;font-size:12px;color:#555;letter-spacing:1px">Calculando rutas activas...</span>
+    </div>
+    <div class="splash-step" id="step4" style="display:flex;align-items:center;gap:10px;opacity:0.3">
+      <div class="step-dot" style="width:8px;height:8px;border-radius:50%;background:#333;flex-shrink:0;transition:all 0.4s"></div>
+      <span style="font-family:'DM Sans',sans-serif;font-size:12px;color:#555;letter-spacing:1px">Inicializando tracker en vivo...</span>
+    </div>
+  </div>
+
+  <!-- Barra de progreso -->
+  <div style="margin-top:32px;width:220px;height:2px;background:#1a1a1a;border-radius:2px;overflow:hidden;opacity:0;transition:opacity 0.5s ease 0.6s" id="splashBarWrap">
+    <div id="splashBar" style="height:100%;width:0%;background:linear-gradient(90deg,#e63946,#ff6b6b);border-radius:2px;transition:width 0.4s ease"></div>
+  </div>
+
+  <!-- Versión -->
+  <div style="position:absolute;bottom:20px;display:flex;flex-direction:column;align-items:center;gap:4px">
+    <div style="font-family:'DM Sans',sans-serif;font-size:11px;color:#333;letter-spacing:2px">TRACKMEAT v2.0</div>
+    <div style="font-family:'DM Sans',sans-serif;font-size:10px;color:#2a2a2a;letter-spacing:1px">Desarrollado por <span style="color:#444">Jonathan Cheves Spinzi</span> · powered by <span style="color:#e63946">Claude</span></div>
+  </div>
+</div>
+
+<script>
+(function() {
+  // Canvas animado — líneas de ruta
+  const canvas = document.getElementById('splashCanvas');
+  const ctx = canvas.getContext('2d');
+  let lines = [];
+  function resizeCanvas() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+  }
+  resizeCanvas();
+  window.addEventListener('resize', resizeCanvas);
+
+  for (let i = 0; i < 12; i++) {
+    lines.push({
+      x: Math.random() * window.innerWidth,
+      y: Math.random() * window.innerHeight,
+      vx: (Math.random() - 0.5) * 0.8,
+      vy: (Math.random() - 0.5) * 0.8,
+      len: Math.random() * 80 + 40,
+      alpha: Math.random() * 0.5 + 0.1,
+      color: Math.random() > 0.5 ? '#e63946' : '#2196f3'
+    });
+  }
+
+  function animCanvas() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    lines.forEach(l => {
+      ctx.beginPath();
+      ctx.strokeStyle = l.color;
+      ctx.globalAlpha = l.alpha;
+      ctx.lineWidth = 1;
+      ctx.moveTo(l.x, l.y);
+      ctx.lineTo(l.x + l.vx * l.len, l.y + l.vy * l.len);
+      ctx.stroke();
+      l.x += l.vx; l.y += l.vy;
+      if (l.x < 0 || l.x > canvas.width) l.vx *= -1;
+      if (l.y < 0 || l.y > canvas.height) l.vy *= -1;
+    });
+    ctx.globalAlpha = 1;
+    if (document.getElementById('splashScreen')) requestAnimationFrame(animCanvas);
+  }
+  animCanvas();
+
+  // Cargar nombre empresa desde localStorage
+  try {
+    const emp = localStorage.getItem('sys_empresa');
+    const nom = localStorage.getItem('sys_nombre');
+    if (emp) {
+      const el = document.getElementById('splashEmpresa');
+      if (el) el.innerHTML = '<span style="color:#fff">' + emp + '</span>';
+    }
+    if (nom) {
+      const el = document.getElementById('splashSubtitulo');
+      if (el) el.textContent = nom;
+    }
+  } catch(e) {}
+
+  // Animaciones de entrada
+  setTimeout(function() {
+    const logo = document.getElementById('splashLogo');
+    if (logo) { logo.style.opacity = '1'; logo.style.transform = 'translateY(0)'; }
+  }, 100);
+  setTimeout(function() {
+    const truck = document.getElementById('splashTruck');
+    if (truck) truck.style.opacity = '1';
+    const steps = document.getElementById('splashSteps');
+    if (steps) steps.style.opacity = '1';
+    const bar = document.getElementById('splashBarWrap');
+    if (bar) bar.style.opacity = '1';
+  }, 500);
+
+  // Pasos secuenciales
+  const pasos = ['step1','step2','step3','step4'];
+  const porcentajes = [20, 45, 70, 95];
+  pasos.forEach(function(id, i) {
+    setTimeout(function() {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.style.opacity = '1';
+      el.querySelector('.step-dot').style.background = '#e63946';
+      el.querySelector('.step-dot').style.boxShadow = '0 0 8px #e63946';
+      el.querySelector('span').style.color = '#ccc';
+      const bar = document.getElementById('splashBar');
+      if (bar) bar.style.width = porcentajes[i] + '%';
+      // Tildar el anterior
+      if (i > 0) {
+        const prev = document.getElementById(pasos[i-1]);
+        if (prev) {
+          prev.querySelector('.step-dot').style.background = '#4caf50';
+          prev.querySelector('.step-dot').style.boxShadow = '0 0 6px #4caf50';
+        }
+      }
+    }, 600 + i * 600);
+  });
+
+  // Finalizar
+  window._splashDone = false;
+  window._splashRemove = function() {
+    if (window._splashDone) return;
+    window._splashDone = true;
+    // Tildar último paso
+    const last = document.getElementById(pasos[pasos.length-1]);
+    if (last) {
+      last.querySelector('.step-dot').style.background = '#4caf50';
+      last.querySelector('.step-dot').style.boxShadow = '0 0 6px #4caf50';
+    }
+    const bar = document.getElementById('splashBar');
+    if (bar) bar.style.width = '100%';
+    setTimeout(function() {
+      const splash = document.getElementById('splashScreen');
+      if (splash) {
+        splash.style.transition = 'opacity 0.6s ease';
+        splash.style.opacity = '0';
+        setTimeout(function() { splash.remove(); }, 600);
+      }
+    }, 400);
+  };
+  // Timeout máximo por si la app tarda
+  setTimeout(window._splashRemove, 5000);
+})();
+</script>
+
 <header class="header">
   <div class="header-left">
     <div class="logo" id="logoEmpresa">LA <span>ANÓNIMA</span></div>
@@ -3050,6 +3394,11 @@
           <option value="ambos">Ambos</option>
         </select>
       </div>
+      <div class="form-group">
+        <label>📱 WhatsApp del gerente</label>
+        <input type="tel" id="aSucTel" placeholder="ej: 2994001234" style="font-size:14px">
+        <small style="color:#888;font-size:11px">Solo números, sin 0 ni 15. Ej: 2994001234</small>
+      </div>
       <div class="form-group" style="grid-column:1/-1">
         <label style="color:#888;font-size:11px">💡 TIP: Para obtener coordenadas exactas, buscá la dirección en <a href="https://www.openstreetmap.org" target="_blank" style="color:var(--accent)">openstreetmap.org</a>, hacé clic derecho en el punto y copiá lat/lng.</label>
       </div>
@@ -3088,6 +3437,13 @@
 </div>
 
 <div class="toast" id="toast"></div>
+
+
+<footer style="text-align:center;padding:16px;margin-top:8px;border-top:1px solid #1a1a1a">
+  <span style="font-family:'DM Sans',sans-serif;font-size:11px;color:#333;letter-spacing:1px">
+    Desarrollado por <span style="color:#555">Jonathan Cheves Spinzi</span> · powered by <span style="color:#e63946">Claude</span> · TRACKMEAT v2.0
+  </span>
+</footer>
 
 </body>
 </html>
