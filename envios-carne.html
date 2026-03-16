@@ -225,20 +225,22 @@
       if (!envio || !envio.horaSalida) return;
 
       const minSalida = horaAMin(envio.horaSalida);
-      const tiempoRutaMin = (r.distTotal / VEL_KMH) * 60;
+      // Usar duración real de OSRM si está disponible, sino fallback a 30km/h
+      const tiempoRutaMin = r.duracionMin || Math.round((r.distTotal / VEL_KMH) * 60);
       const etaMin = minSalida + tiempoRutaMin;
       const etaHora = minAHora(Math.round(etaMin));
       const minTranscurridos = minAhora - minSalida;
-      const kmRecorridoReal = (minTranscurridos / 60) * VEL_KMH;
-      // Limitar al 90% hasta que se confirme la recepción
-      const kmMax = r.distTotal * 0.90;
-      const kmRecorrido = Math.min(kmRecorridoReal, kmMax);
+      // Progreso basado en tiempo real OSRM
+      const progresoReal = tiempoRutaMin > 0 ? minTranscurridos / tiempoRutaMin : 0;
+      const progresoMax = 0.90; // limitar al 90% hasta confirmar recepción
+      const progreso = Math.min(progresoReal, progresoMax);
+      const kmRecorrido = progreso * r.distTotal;
       const kmRestante = Math.max(r.distTotal - kmRecorrido, 0);
-      const minRestantes = Math.round((kmRestante / VEL_KMH) * 60);
+      const minRestantes = Math.round((1 - progreso) * tiempoRutaMin);
       const etaActual = minAhora + minRestantes;
       const etaActualHora = minAHora(etaActual);
       const demoraVsETA = etaActual - Math.round(etaMin);
-      const pct = Math.min(100, Math.round((kmRecorrido / r.distTotal) * 100));
+      const pct = Math.min(100, Math.round(progreso * 100));
 
       let estadoColor, estadoTexto, estadoBg;
       if (minTranscurridos < 0) {
@@ -376,6 +378,8 @@
         distancias.push(distancias[i-1] + haversine(coords[i-1], coords[i]));
       }
       const distTotal = distancias[distancias.length-1];
+      // Duración real de OSRM en minutos (considera calles, giros, tipo de vía)
+      const duracionOsrmMin = Math.round(data.routes[0].duration / 60);
 
       const layerPendiente = L.polyline(coords, { color: '#444', weight: 5, opacity: 0.45, dashArray: '6,5' }).addTo(mapa);
       const layerRecorrido = L.polyline([coords[0]], { color: color, weight: 6, opacity: 0.95, lineCap: 'round', lineJoin: 'round' }).addTo(mapa);
@@ -392,7 +396,7 @@
       });
       const marcador = L.marker(coords[0], { icon: camionIcon }).addTo(mapa);
 
-      rutasMulti[key] = { layerPendiente, layerRecorrido, labelMarker, marcador, coords, distancias, distTotal, color, envio };
+      rutasMulti[key] = { layerPendiente, layerRecorrido, labelMarker, marcador, coords, distancias, distTotal, duracionMin: duracionOsrmMin, color, envio };
 
       // Compat con sistema de tracker existente (usa primer envío)
       if (colorIdx === 0) {
@@ -537,20 +541,46 @@
     if (body.id) params.id = body.id;
     if (body.data) {
       const d = body.data;
-      params.fecha            = d.fecha         || '';
-      params.chofer           = d.chofer        || '';
-      params.patente          = d.patente        || '';
-      params.origenId         = d.origenId       || '';
-      params.destinoId        = d.destinoId      || '';
-      params.horaSalida       = d.horaSalida     || '';
-      params.tempSalida       = String(d.tempSalida  || '');
-      params.horaLlegada      = d.horaLlegada    || '';
-      params.tempLlegada      = String(d.tempLlegada || '');
-      params.desvios          = d.desvios        || '';
-      params.observaciones    = d.observaciones  || '';
-      params.sinFotoEvidencia = d.sinFotoEvidencia ? '1' : '0';
+      params.fecha              = d.fecha            || '';
+      params.chofer             = d.chofer           || '';
+      params.patente            = d.patente          || '';
+      params.origenId           = d.origenId         || '';
+      params.destinoId          = d.destinoId        || '';
+      params.horaSalida         = d.horaSalida       || '';
+      params.tempSalida         = String(d.tempSalida   || '');
+      params.tempMercaderia     = String(d.tempMercaderia || '');
+      params.horaLlegada        = d.horaLlegada      || '';
+      params.tempLlegada        = String(d.tempLlegada  || '');
+      params.tempCamionLlegada  = String(d.tempCamionLlegada || '');
+      params.desvios            = d.desvios          || '';
+      params.observaciones      = d.observaciones    || '';
+      params.sinFotoEvidencia   = d.sinFotoEvidencia ? '1' : '0';
+      params.fotoSalidaBase64   = d.fotoSalidaUrl    || '';
+      params.fotoBase64         = d.fotoUrl          || '';
+      params.firmaBase64        = d.firmaBase64      || '';
+    }
+    // Usar POST si hay imágenes (base64 es muy largo para GET)
+    const tieneImagenes = params.fotoSalidaBase64 || params.fotoBase64 || params.firmaBase64;
+    if (tieneImagenes) {
+      return gasCallPost(params);
     }
     return gasCall(params);
+  }
+
+  async function gasCallPost(params) {
+    const url = GAS_URL;
+    const body = Object.entries(params)
+      .map(([k,v]) => encodeURIComponent(k) + '=' + encodeURIComponent(String(v === null || v === undefined ? '' : v)))
+      .join('&');
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body,
+      redirect: 'follow'
+    });
+    const text = await r.text();
+    try { return JSON.parse(text); }
+    catch(e) { throw new Error('Respuesta inválida: ' + text.slice(0,200)); }
   }
 
   async function cargarEnvios() {
@@ -580,12 +610,19 @@
     const tempLlegada = document.getElementById('tempLlegada').value;
     let horaLlegada = document.getElementById('horaLlegada').value;
 
-
     if (!tempLlegada) {
       mostrarToast('Ingresá la temperatura de llegada ⚠️', 'warn');
       document.getElementById('tempLlegada').focus();
       return;
     }
+
+    // Validar firma
+    if (!firmaTieneTrazos) {
+      mostrarToast('La firma del receptor es obligatoria ✍️', 'warn');
+      document.getElementById('firmaCanvas').scrollIntoView({ behavior: 'smooth' });
+      return;
+    }
+    const firmaBase64 = getFirmaBase64();
 
     // Modal de confirmación con sucursal receptora
     const ec = window._envioActivoSeleccionado || window._envioEnCurso;
@@ -677,12 +714,15 @@
       destinoId:    ecActual ? ecActual.destinoId : (getSucDestino()||['235'])[0],
       horaSalida:   ecActual ? ecActual.horaSalida : document.getElementById('horaSalida').value,
       tempSalida:   ecActual ? ecActual.tempSalida : document.getElementById('tempSalida').value,
+      tempMercaderia: ecActual ? (ecActual.tempMercaderia || '') : (document.getElementById('tempMercaderia') ? document.getElementById('tempMercaderia').value : ''),
       horaLlegada:  horaLlegada,
       tempLlegada:  tempLlegada,
+      tempCamionLlegada: document.getElementById('tempCamionLlegada') ? document.getElementById('tempCamionLlegada').value : '',
       observaciones: document.getElementById('observaciones').value,
       desvios:      document.getElementById('desviosSeleccionados').value,
       fotoUrl:      window._fotoRecepcionBase64 || fotoBase64 || null,
       fotoSalidaUrl: (ecActual && ecActual.fotoSalidaBase64) || window._fotoSalidaBase64 || null,
+      firmaBase64:  firmaBase64 || null,
       sinFotoEvidencia: ecActual ? ecActual.sinFotoEvidencia : (window._salidaSinFoto || false),
       fechaCreacion: Date.now()
     };
@@ -776,98 +816,109 @@
     const filtrados = getEnviosFiltrados().filter(e => !!e.horaLlegada);
     if (!filtrados.length) { mostrarToast('No hay datos para exportar', 'warn'); return; }
 
-    // Usar XLSXStyle si está disponible, si no fallback a XLSX normal
     const XS = window.XLSXStyle || window.XLSX;
-
     const empresa = localStorage.getItem('sys_empresa') || 'LA ANÓNIMA';
     const titulo = 'CONTROL DE ENVIOS DE CARNE — ' + empresa;
     const generado = 'Generado: ' + new Date().toLocaleString('es-AR');
 
-    // Estilos
-    const BG1    = '1C1C1C';  // fila par  — gris muy oscuro
-    const BG2    = '242424';  // fila impar
-    const BGHDR  = '0C0C0C';  // header tabla
-    const BGTIT  = '0C0C0C';  // título
-    const TXT    = 'DCDCDC';  // texto normal
-    const TXTSUB = '888888';  // texto secundario
-    const BORD   = { style: 'thin', color: { rgb: '2D2D2D' } };
+    // ── Estilos ──
+    const BORD   = { style: 'thin', color: { rgb: '4A5568' } };
     const bordes = { top: BORD, bottom: BORD, left: BORD, right: BORD };
+    const stTit  = { font: { bold: true, sz: 14, color: { rgb: 'FFFFFF' } }, fill: { fgColor: { rgb: '1E2330' } }, alignment: { horizontal: 'left', vertical: 'center' } };
+    const stSub  = { font: { sz: 9, color: { rgb: '888888' } }, fill: { fgColor: { rgb: '1E2330' } } };
+    const stVacio = { fill: { fgColor: { rgb: '1C2028' } } };
+    // Header grupo (fondo oscuro, texto gris claro)
+    const stHG   = { font: { bold: true, sz: 9, color: { rgb: 'AAAAAA' } }, fill: { fgColor: { rgb: '1E2330' } }, alignment: { horizontal: 'center', vertical: 'center', wrapText: true }, border: bordes };
+    // Header sub (fondo un poco más claro)
+    const stHS   = { font: { bold: true, sz: 8, color: { rgb: '888888' } }, fill: { fgColor: { rgb: '252C3A' } }, alignment: { horizontal: 'center', vertical: 'center' }, border: bordes };
+    const stBase = (i) => ({ fill: { fgColor: { rgb: i%2===0 ? '2D3440' : '343C4A' } }, font: { sz: 9, color: { rgb: 'DCDCDC' } }, border: bordes, alignment: { vertical: 'center' } });
+    const stCtr  = (i) => Object.assign({}, stBase(i), { alignment: { horizontal: 'center', vertical: 'center' } });
+    const stRojo = (i) => Object.assign({}, stCtr(i), { font: { sz: 9, color: { rgb: 'E63946' } } });
+    const stAzul = (i) => Object.assign({}, stCtr(i), { font: { sz: 9, color: { rgb: '2196F3' } } });
+    const stNar  = (i) => Object.assign({}, stCtr(i), { font: { sz: 9, color: { rgb: 'FF9800' } } });
+    const stNarMal=(i) => Object.assign({}, stCtr(i), { font: { sz: 9, bold: true, color: { rgb: 'F44336' } } });
+    const stOK   = { font: { bold: true, sz: 9, color: { rgb: '4CAF50' } }, fill: { fgColor: { rgb: '1A3828' } }, alignment: { horizontal: 'center' }, border: bordes };
+    const stRev  = { font: { bold: true, sz: 9, color: { rgb: 'F44336' } }, fill: { fgColor: { rgb: '3D1A1A' } }, alignment: { horizontal: 'center' }, border: bordes };
+    const stTot  = { font: { bold: true, sz: 10, color: { rgb: 'FFFFFF' } }, fill: { fgColor: { rgb: '1E2330' } } };
 
-    const stTitulo = { font: { bold: true, sz: 14, color: { rgb: 'FFFFFF' } }, fill: { fgColor: { rgb: BGTIT } }, alignment: { horizontal: 'left', vertical: 'center' } };
-    const stSub    = { font: { sz: 9,  color: { rgb: TXTSUB } }, fill: { fgColor: { rgb: BGTIT } } };
-    const stHeader = { font: { bold: true, sz: 9, color: { rgb: TXTSUB } }, fill: { fgColor: { rgb: BGHDR } }, alignment: { horizontal: 'center', vertical: 'center' }, border: bordes };
-    const stDataPar   = { fill: { fgColor: { rgb: BG1 } }, font: { sz: 9, color: { rgb: TXT } }, border: bordes, alignment: { vertical: 'center' } };
-    const stDataImpar = { fill: { fgColor: { rgb: BG2 } }, font: { sz: 9, color: { rgb: TXT } }, border: bordes, alignment: { vertical: 'center' } };
-    const stSalida   = (base) => Object.assign({}, base, { font: { sz: 9, bold: false, color: { rgb: 'E63946' } }, alignment: { horizontal: 'center', vertical: 'center' } });
-    const stLlegada  = (base) => Object.assign({}, base, { font: { sz: 9, bold: false, color: { rgb: '2196F3' } }, alignment: { horizontal: 'center', vertical: 'center' } });
-    const stTemp     = (base) => Object.assign({}, base, { font: { sz: 9, bold: false, color: { rgb: 'FF9800' } }, alignment: { horizontal: 'center', vertical: 'center' } });
-    const stTempMal  = (base) => Object.assign({}, base, { font: { sz: 9, bold: true,  color: { rgb: 'F44336' } }, alignment: { horizontal: 'center', vertical: 'center' } });
-    const stOK       = { font: { bold: true, sz: 9, color: { rgb: '4CAF50' } }, fill: { fgColor: { rgb: '142814' } }, alignment: { horizontal: 'center' }, border: bordes };
-    const stRevisar  = { font: { bold: true, sz: 9, color: { rgb: 'F44336' } }, fill: { fgColor: { rgb: '321414' } }, alignment: { horizontal: 'center' }, border: bordes };
-    const stTotal    = { font: { bold: true, sz: 10, color: { rgb: 'FFFFFF' } }, fill: { fgColor: { rgb: '0C0C0C' } } };
-    const stCentro   = (base) => Object.assign({}, base, { alignment: { horizontal: 'center', vertical: 'center' } });
+    const COLS = 14;
 
-    const COLS = 12;
-    const HDR_ROW = 3; // 0-indexed: fila 4 en Excel
-
-    // Armar datos
+    // ── Filas de datos ──
     const dataRows = filtrados.map((e, i) => {
       const dur = calcDuracion(e.horaSalida, e.horaLlegada);
-      const diffTemp = parseFloat(e.tempLlegada) - parseFloat(e.tempSalida);
-      const esRevisar = !isNaN(diffTemp) && Math.abs(diffTemp) > 2;
-      const estado = esRevisar ? 'Revisar' : 'OK';
+      const diff = parseFloat(e.tempLlegada) - parseFloat(e.tempSalida);
+      const esRev = !isNaN(diff) && Math.abs(diff) > 2;
       const ruta = 'Suc.' + e.origenId + ' -> Suc.' + e.destinoId;
-      const base = i % 2 === 0 ? stDataPar : stDataImpar;
       return [
-        { v: e.fecha,                       s: base },
-        { v: ruta,                          s: base },
-        { v: e.chofer,                      s: base },
-        { v: e.patente || '',               s: stCentro(base) },
-        { v: e.horaSalida,                  s: stSalida(base) },
-        { v: e.tempSalida + 'C',            s: stTemp(base) },
-        { v: e.horaLlegada,                 s: stLlegada(base) },
-        { v: e.tempLlegada + 'C',           s: esRevisar ? stTempMal(base) : stTemp(base) },
-        { v: dur,                           s: stCentro(base) },
-        { v: estado,                        s: esRevisar ? stRevisar : stOK },
-        { v: formatDesviosPlain(e.desvios), s: base },
-        { v: textoPlano(e.observaciones),   s: base },
+        { v: e.fecha,                              s: stBase(i) },
+        { v: ruta,                                 s: stBase(i) },
+        { v: e.chofer,                             s: stBase(i) },
+        { v: e.patente || '',                      s: stCtr(i) },
+        { v: e.horaSalida,                         s: stRojo(i) },
+        { v: e.horaLlegada || '-',                 s: stAzul(i) },
+        { v: dur,                                  s: stCtr(i) },
+        { v: e.tempSalida + 'C',                   s: stNar(i) },
+        { v: e.tempCamionLlegada ? e.tempCamionLlegada + 'C' : '-', s: stNar(i) },
+        { v: e.tempMercaderia ? e.tempMercaderia + 'C' : '-',       s: stNar(i) },
+        { v: e.tempLlegada + 'C',                  s: esRev ? stNarMal(i) : stNar(i) },
+        { v: esRev ? 'Revisar' : 'OK',             s: esRev ? stRev : stOK },
+        { v: formatDesviosPlain(e.desvios),        s: stBase(i) },
+        { v: textoPlano(e.observaciones),          s: stBase(i) },
       ];
     });
 
+    // ── Estructura de la hoja ──
+    // R0: título, R1: generado, R2: vacía
+    // R3: header fila 1 (grupos), R4: header fila 2 (subcolumnas)
+    // R5..N: datos, RN+1: vacía, RN+2: total
+    const R_HDR1 = 3, R_HDR2 = 4, R_DATA = 5;
+
+    const h1 = (txt) => ({ v: txt, s: stHG });
+    const h2 = (txt) => ({ v: txt, s: stHS });
+    const em = ()    => ({ v: '', s: stHG });
+
     const ws_data = [
-      // Fila 1: título (merge de toda la fila)
-      [{ v: titulo, s: stTitulo }, ...Array(COLS-1).fill({ v: '', s: stTitulo })],
-      // Fila 2: generado
-      [{ v: generado, s: stSub }, ...Array(COLS-1).fill({ v: '', s: stSub })],
-      // Fila 3: vacía
-      Array(COLS).fill({ v: '' }),
-      // Fila 4: headers
-      ['Fecha','Ruta','Chofer','Patente','Hora Sal.','Temp. Sal. (C)','Hora Lleg.','Temp. Lleg. (C)','Duracion','Estado','Desvios','Observaciones']
-        .map(h => ({ v: h, s: stHeader })),
-      // Datos
+      [{ v: titulo,   s: stTit  }, ...Array(COLS-1).fill({ v: '', s: stTit })],
+      [{ v: generado, s: stSub  }, ...Array(COLS-1).fill({ v: '', s: stSub })],
+      Array(COLS).fill({ v: '', s: stVacio }),
+      // Header fila 1
+      [ h1('Fecha'), h1('Ruta'), h1('Chofer'), h1('Patente'), h1('Hora Sal.'), h1('Hora Lleg.'), h1('Dur.'), h1('T. Camion'), em(), h1('T. Mercaderia'), em(), h1('Estado'), h1('Desvios'), h1('Observaciones') ],
+      // Header fila 2
+      [ em(), em(), em(), em(), em(), em(), em(), h2('Sal.'), h2('Lleg.'), h2('Sal.'), h2('Lleg.'), em(), em(), em() ],
       ...dataRows,
-      // Vacía
-      Array(COLS).fill({ v: '' }),
-      // Totales
-      [
-        { v: 'TOTAL: ' + filtrados.length + ' envios', s: stTotal },
-        ...Array(COLS-1).fill({ v: '', s: stTotal })
-      ]
+      Array(COLS).fill({ v: '', s: stVacio }),
+      [{ v: 'TOTAL: ' + filtrados.length + ' envios', s: stTot }, ...Array(COLS-1).fill({ v: '', s: stTot })]
     ];
 
     const ws = XS.utils.aoa_to_sheet(ws_data);
 
-    // Anchos de columna
-    ws['!cols'] = [12, 18, 14, 12, 11, 14, 11, 15, 11, 10, 22, 32].map(w => ({ wch: w }));
+    // Anchos de columna (en caracteres)
+    ws['!cols'] = [12, 18, 14, 11, 10, 10, 9, 9, 9, 9, 9, 10, 28, 22].map(w => ({ wch: w }));
 
-    // Altura de filas
-    ws['!rows'] = [{ hpt: 28 }, { hpt: 16 }, { hpt: 8 }, { hpt: 22 }];
+    // Alturas
+    ws['!rows'] = [{ hpt: 28 }, { hpt: 16 }, { hpt: 6 }, { hpt: 24 }, { hpt: 18 }];
 
-    // Merges: título y subtítulo abarcan toda la fila
+    // Merges
+    const totalRow = ws_data.length - 1;
     ws['!merges'] = [
+      // Título y subtítulo
       { s: { r: 0, c: 0 }, e: { r: 0, c: COLS-1 } },
       { s: { r: 1, c: 0 }, e: { r: 1, c: COLS-1 } },
-      { s: { r: ws_data.length-1, c: 0 }, e: { r: ws_data.length-1, c: COLS-1 } },
+      // Total
+      { s: { r: totalRow, c: 0 }, e: { r: totalRow, c: COLS-1 } },
+      // Header fila 1 — columnas sin subcolumnas se extienden 2 filas
+      { s: { r: R_HDR1, c: 0  }, e: { r: R_HDR2, c: 0  } },  // Fecha
+      { s: { r: R_HDR1, c: 1  }, e: { r: R_HDR2, c: 1  } },  // Ruta
+      { s: { r: R_HDR1, c: 2  }, e: { r: R_HDR2, c: 2  } },  // Chofer
+      { s: { r: R_HDR1, c: 3  }, e: { r: R_HDR2, c: 3  } },  // Patente
+      { s: { r: R_HDR1, c: 4  }, e: { r: R_HDR2, c: 4  } },  // Hora Sal.
+      { s: { r: R_HDR1, c: 5  }, e: { r: R_HDR2, c: 5  } },  // Hora Lleg.
+      { s: { r: R_HDR1, c: 6  }, e: { r: R_HDR2, c: 6  } },  // Dur.
+      { s: { r: R_HDR1, c: 7  }, e: { r: R_HDR1, c: 8  } },  // T. Camion (2 cols)
+      { s: { r: R_HDR1, c: 9  }, e: { r: R_HDR1, c: 10 } },  // T. Mercaderia (2 cols)
+      { s: { r: R_HDR1, c: 11 }, e: { r: R_HDR2, c: 11 } },  // Estado
+      { s: { r: R_HDR1, c: 12 }, e: { r: R_HDR2, c: 12 } },  // Desvios
+      { s: { r: R_HDR1, c: 13 }, e: { r: R_HDR2, c: 13 } },  // Observaciones
     ];
 
     const wb = XS.utils.book_new();
@@ -886,12 +937,12 @@
     const empNombre = localStorage.getItem('sys_empresa') || 'La Anonima S.A.';
     const subNombre = localStorage.getItem('sys_nombre') || 'Sistema de Entregas';
 
-    // ── Fondo total oscuro ──
-    doc.setFillColor(18, 18, 18);
+    // ── Fondo slate ──
+    doc.setFillColor(45, 52, 62);
     doc.rect(0, 0, W, pgH, 'F');
 
     // ── Header ──
-    doc.setFillColor(12, 12, 12);
+    doc.setFillColor(30, 35, 44);
     doc.rect(0, 0, W, 22, 'F');
     // Acento rojo izquierda
     doc.setFillColor(230, 57, 70);
@@ -902,7 +953,7 @@
     doc.text('CONTROL DE ENVIOS DE CARNE', 10, 10);
     doc.setFontSize(8);
     doc.setFont('helvetica', 'normal');
-    doc.setTextColor(150, 150, 150);
+    doc.setTextColor(180, 190, 200);
     doc.text(empNombre + ' — ' + subNombre, 10, 17);
     doc.text('Generado: ' + new Date().toLocaleString('es-AR'), W - 10, 17, { align: 'right' });
 
@@ -914,77 +965,142 @@
       const estado = esRevisar ? 'Revisar' : 'OK';
       const ruta = 'Suc.' + e.origenId + ' -> Suc.' + e.destinoId;
       return {
-        cells: [e.fecha, ruta, e.chofer, e.patente || '', e.horaSalida, e.tempSalida + 'C', e.horaLlegada, e.tempLlegada + 'C', dur, estado, formatDesviosPlain(e.desvios), textoPlano(e.observaciones)],
+        cells: [e.fecha, ruta, e.chofer, e.patente || '', e.horaSalida, e.horaLlegada || '-', dur, e.tempSalida + 'C', e.tempCamionLlegada ? e.tempCamionLlegada + 'C' : '-', e.tempMercaderia ? e.tempMercaderia + 'C' : '-', e.tempLlegada + 'C', estado, formatDesviosPlain(e.desvios), textoPlano(e.observaciones)],
         esRevisar
       };
     });
 
+    // A4 landscape = 297mm, margen 6 c/u = 285mm útiles
     doc.autoTable({
       startY: 26,
-      head: [['Fecha','Ruta','Chofer','Patente','Salida','Temp.Sal.','Llegada','Temp.Lleg.','Duracion','Estado','Desvios','Observaciones']],
+      margin: { left: 6, right: 6 },
+      tableWidth: 285,
+      head: [
+        // Fila 1: headers agrupados
+        [
+          { content: 'Fecha',        rowSpan: 2, styles: { valign: 'middle', halign: 'center' } },
+          { content: 'Ruta',         rowSpan: 2, styles: { valign: 'middle' } },
+          { content: 'Chofer',       rowSpan: 2, styles: { valign: 'middle' } },
+          { content: 'Patente',      rowSpan: 2, styles: { valign: 'middle', halign: 'center' } },
+          { content: 'Hora\nSal.',   rowSpan: 2, styles: { valign: 'middle', halign: 'center' } },
+          { content: 'Hora\nLleg.',  rowSpan: 2, styles: { valign: 'middle', halign: 'center' } },
+          { content: 'Dur.',         rowSpan: 2, styles: { valign: 'middle', halign: 'center' } },
+          { content: 'T. Camion',    colSpan: 2, styles: { halign: 'center' } },
+          { content: 'T. Mercaderia', colSpan: 2, styles: { halign: 'center' } },
+          { content: 'Estado',       rowSpan: 2, styles: { valign: 'middle', halign: 'center' } },
+          { content: 'Desvios',      rowSpan: 2, styles: { valign: 'middle' } },
+          { content: 'Observaciones', rowSpan: 2, styles: { valign: 'middle' } },
+        ],
+        // Fila 2: subcolumnas de temperaturas
+        [
+          { content: 'Sal.',  styles: { halign: 'center' } },
+          { content: 'Lleg.', styles: { halign: 'center' } },
+          { content: 'Sal.',  styles: { halign: 'center' } },
+          { content: 'Lleg.', styles: { halign: 'center' } },
+        ]
+      ],
       body: rows.map(r => r.cells),
       theme: 'plain',
       styles: {
-        fontSize: 7.5,
+        fontSize: 7,
         cellPadding: { top: 3, bottom: 3, left: 3, right: 3 },
-        textColor: [220, 220, 220],
-        fillColor: [28, 28, 28],
-        lineColor: [45, 45, 45],
+        textColor: [230, 235, 240],
+        fillColor: [45, 52, 62],
+        lineColor: [65, 75, 88],
         lineWidth: 0.3,
-        font: 'helvetica'
+        font: 'helvetica',
+        overflow: 'linebreak'
       },
       headStyles: {
-        fillColor: [35, 35, 35],
-        textColor: [150, 150, 150],
+        fillColor: [30, 35, 44],
+        textColor: [160, 175, 190],
         fontStyle: 'bold',
-        fontSize: 7,
-        lineColor: [60, 60, 60],
-        lineWidth: 0.3
+        fontSize: 6.5,
+        lineColor: [65, 75, 88],
+        lineWidth: 0.3,
+        halign: 'center'
       },
       alternateRowStyles: {
-        fillColor: [33, 33, 33]
+        fillColor: [52, 60, 72]
       },
       columnStyles: {
-        0: { cellWidth: 22 },
-        1: { cellWidth: 26 },
-        2: { cellWidth: 20 },
-        3: { cellWidth: 18, halign: 'center' },
-        4: { cellWidth: 16, halign: 'center', textColor: [230, 57, 70] },
-        5: { cellWidth: 18, halign: 'center', textColor: [255, 152, 0] },
-        6: { cellWidth: 16, halign: 'center', textColor: [33, 150, 243] },
-        7: { cellWidth: 20, halign: 'center', textColor: [255, 152, 0] },
-        8: { cellWidth: 16, halign: 'center' },
-        9: { cellWidth: 16, halign: 'center', fontStyle: 'bold' },
-        10: { cellWidth: 34 },
-        11: { cellWidth: 'auto' }
+        0:  { cellWidth: 20, halign: 'center' },                              // Fecha
+        1:  { cellWidth: 22 },                                                 // Ruta
+        2:  { cellWidth: 18 },                                                 // Chofer
+        3:  { cellWidth: 16, halign: 'center' },                              // Patente
+        4:  { cellWidth: 13, halign: 'center', textColor: [230, 57, 70] },    // Hora Sal.
+        5:  { cellWidth: 13, halign: 'center', textColor: [33, 150, 243] },   // Hora Lleg.
+        6:  { cellWidth: 13, halign: 'center' },                              // Dur.
+        7:  { cellWidth: 12, halign: 'center', textColor: [255, 152, 0] },    // T.Cam.Sal.
+        8:  { cellWidth: 12, halign: 'center', textColor: [255, 152, 0] },    // T.Cam.Lleg.
+        9:  { cellWidth: 12, halign: 'center', textColor: [255, 152, 0] },    // T.Merc.Sal.
+        10: { cellWidth: 12, halign: 'center', textColor: [255, 152, 0] },    // T.Merc.Lleg.
+        11: { cellWidth: 20, halign: 'center', fontStyle: 'bold' },           // Estado
+        12: { cellWidth: 50 },                                                 // Desvios
+        13: { cellWidth: 40 }                                                  // Observaciones
       },
       didParseCell: function(data) {
-        if (data.section === 'body' && data.column.index === 9) {
+        if (data.section === 'body' && data.column.index === 11) {
           const esRev = rows[data.row.index] && rows[data.row.index].esRevisar;
           if (esRev) {
             data.cell.styles.textColor = [244, 67, 54];
-            data.cell.styles.fillColor = [50, 20, 20];
+            data.cell.styles.fillColor = [80, 30, 35];
           } else {
             data.cell.styles.textColor = [76, 175, 80];
-            data.cell.styles.fillColor = [20, 40, 20];
+            data.cell.styles.fillColor = [25, 55, 35];
           }
-        }
-        // Temp. sal roja si muy baja
-        if (data.section === 'body' && data.column.index === 5) {
-          data.cell.styles.textColor = [255, 152, 0];
-        }
-        if (data.section === 'body' && data.column.index === 7) {
-          const diff = parseFloat(filtrados[data.row.index]?.tempLlegada) - parseFloat(filtrados[data.row.index]?.tempSalida);
-          data.cell.styles.textColor = (!isNaN(diff) && Math.abs(diff) > 2) ? [244, 67, 54] : [255, 152, 0];
         }
       }
     });
 
+    // ── Firmas en el PDF ──
+    // Agregar firma como imagen en una fila extra por envío que tenga firma
+    filtrados.forEach(function(e, i) {
+      if (!e.firmaBase64) return;
+      try {
+        const tableY = doc.lastAutoTable.finalY || 30;
+        // No es práctico embeber por fila en autoTable — se agrega sección de firmas al final
+      } catch(err) {}
+    });
+
+    // Sección de firmas al final del PDF (si hay alguna)
+    const conFirma = filtrados.filter(function(e) { return e.urlFirma || e.firmaBase64; });
+    if (conFirma.length) {
+      let curY = (doc.lastAutoTable ? doc.lastAutoTable.finalY : 30) + 10;
+      doc.setFontSize(9);
+      doc.setTextColor(160, 175, 190);
+      doc.setFont('helvetica', 'bold');
+      doc.text('FIRMAS DE RECEPCION', 10, curY);
+      curY += 6;
+      conFirma.forEach(function(e) {
+        if (curY > pgH - 40) { doc.addPage(); curY = 20; }
+        doc.setFontSize(7.5);
+        doc.setFont('helvetica', 'normal');
+        doc.setTextColor(160, 175, 190);
+        doc.text('Suc.' + e.origenId + ' -> Suc.' + e.destinoId + '  |  ' + e.patente + '  |  ' + e.fecha + '  |  Chofer: ' + e.chofer, 10, curY);
+        curY += 4;
+        // Usar firmaBase64 local si está, sino indicar que está en Drive
+        if (e.firmaBase64) {
+          try { doc.addImage(e.firmaBase64, 'PNG', 10, curY, 60, 20); } catch(err) {}
+        } else if (e.urlFirma) {
+          doc.setTextColor(33, 150, 243);
+          doc.textWithLink('Ver firma en Drive →', 10, curY + 10, { url: e.urlFirma });
+          doc.setTextColor(160, 175, 190);
+        }
+        doc.setDrawColor(65, 75, 88);
+        doc.line(10, curY + 22, 70, curY + 22);
+        doc.setTextColor(100, 115, 130);
+        doc.setFontSize(6.5);
+        doc.text('Firma receptor', 10, curY + 26);
+        curY += 32;
+      });
+    }
+
     // ── Footer ──
-    doc.setFillColor(12, 12, 12);
+    doc.setFillColor(30, 35, 44);
     doc.rect(0, pgH - 10, W, 10, 'F');
     doc.setFontSize(7.5);
-    doc.setTextColor(100, 100, 100);
+    doc.setTextColor(140, 155, 170);
     doc.text('Total: ' + filtrados.length + ' envios completados', 10, pgH - 4);
     doc.text(empNombre, W - 10, pgH - 4, { align: 'right' });
 
@@ -1032,7 +1148,10 @@
     const [a, b] = [h1, h2].map(h => { const [hh, mm] = h.split(':').map(Number); return hh * 60 + mm; });
     const diff = b - a;
     if (diff < 0) return '-';
-    return `${Math.floor(diff / 60)}h ${diff % 60}min`;
+    const horas = Math.floor(diff / 60);
+    const mins = diff % 60;
+    if (horas === 0) return `${mins}min`;
+    return `${horas}h ${mins}min`;
   }
 
   function renderTabla() {
@@ -1050,6 +1169,11 @@
       const dur = calcDuracion(e.horaSalida, e.horaLlegada);
       const tempDiff = parseFloat(e.tempLlegada) - parseFloat(e.tempSalida);
       const alerta = tempDiff > 2;
+      const iconos = [
+        e.urlFotoSalida  ? `<a href="${e.urlFotoSalida}"  target="_blank" title="📷 Foto salida"  style="color:#2196f3;font-size:16px;text-decoration:none">📷</a>` : '',
+        e.urlFotoLlegada ? `<a href="${e.urlFotoLlegada}" target="_blank" title="🖼️ Foto llegada" style="color:#4caf50;font-size:16px;text-decoration:none">🖼️</a>` : '',
+        e.urlFirma       ? `<a href="${e.urlFirma}"       target="_blank" title="✍️ Firma"        style="color:#ff9800;font-size:16px;text-decoration:none">✍️</a>` : '',
+      ].filter(Boolean).join(' ');
       return `
         <tr>
           <td>${e.fecha}</td>
@@ -1062,6 +1186,7 @@
           <td>${dur}</td>
           <td>${alerta ? '<span class="status warn">⚠️ Revisar</span>' : '<span class="status ok">✓ OK</span>'}</td>
           <td>${renderDesviosBadges(e.desvios)}</td>
+          <td style="white-space:nowrap">${iconos || '—'}</td>
         </tr>`;
     }).join('');
   }
@@ -1081,7 +1206,7 @@
     if (!card || !lista) return;
     const hoy = new Date().toISOString().slice(0,10);
     const hoy_envios = envios.filter(function(e) {
-      return e.fecha === hoy;
+      return e.fecha === hoy && e.horaSalida; // ignorar registros incompletos sin hora de salida
     });
     if (!hoy_envios.length) { card.style.display = 'none'; return; }
     card.style.display = 'block';
@@ -1192,6 +1317,9 @@
       'Llegada — ' + (dSuc.direccion || dSuc.label || '');
     // Limpiar campos de recepción
     document.getElementById('tempLlegada').value = '';
+    const tCamL = document.getElementById('tempCamionLlegada');
+    if (tCamL) tCamL.value = '';
+    limpiarFirma();
     document.getElementById('horaLlegada').value = '';
     limpiarDesviosCheck();
     document.getElementById('observaciones').value = '';
@@ -1487,6 +1615,11 @@
     // Guardar datos del envío en curso
     const oId = document.getElementById('formOrigen').value;
     const dId = document.getElementById('formDestino').value;
+    if (oId && dId && oId === dId) {
+      mostrarToast('El origen y el destino no pueden ser la misma sucursal ⚠️', 'warn');
+      document.getElementById('formDestino').focus();
+      return;
+    }
     const nuevoEnvio = {
       fecha:     document.getElementById('fecha').value,
       chofer:    document.getElementById('chofer').value.trim(),
@@ -1724,11 +1857,17 @@
     if (!selO || !selD) return;
     const activeO = localStorage.getItem('suc_origen_active') || (Object.entries(SUCURSALES).find(([,s])=>s.rol==='origen')||[''])[0];
     const activeD = localStorage.getItem('suc_destino_active') || (Object.entries(SUCURSALES).find(([,s])=>s.rol==='destino')||[''])[0];
-    selO.innerHTML = ids.map(function(id) {
+
+    // Origen: solo sucursales con rol "origen" o "ambos" (NO las de rol "destino")
+    const idsOrigen = ids.filter(function(id) { return SUCURSALES[id].rol !== 'destino'; });
+    // Destino: todas las sucursales
+    const idsDestino = ids;
+
+    selO.innerHTML = idsOrigen.map(function(id) {
       const s = SUCURSALES[id];
       return '<option value="' + id + '"' + (id === activeO ? ' selected' : '') + '>Suc. ' + id + ' — ' + (s.direccion||s.dir||'') + '</option>';
     }).join('');
-    selD.innerHTML = ids.map(function(id) {
+    selD.innerHTML = idsDestino.map(function(id) {
       const s = SUCURSALES[id];
       return '<option value="' + id + '"' + (id === activeD ? ' selected' : '') + '>Suc. ' + id + ' — ' + (s.direccion||s.dir||'') + '</option>';
     }).join('');
@@ -1818,6 +1957,80 @@
         '<span style="background:' + dSuc.color + ';color:#fff;padding:3px 10px;border-radius:4px;font-weight:700;font-size:12px">Suc. ' + dId + '</span>' +
         '<span style="color:#888;font-size:13px">' + dSuc.direccion||dSuc.label||'' + '</span>' +
       '</span>';
+  }
+
+  // ── FIRMA DIGITAL ──────────────────────────────────────────
+  let firmaActiva = false;
+  let firmaCtx = null;
+  let firmaTieneTrazos = false;
+
+  function initFirma() {
+    const canvas = document.getElementById('firmaCanvas');
+    if (!canvas) return;
+    // Ajustar resolución real del canvas al tamaño CSS
+    const rect = canvas.getBoundingClientRect();
+    canvas.width  = rect.width  * window.devicePixelRatio;
+    canvas.height = rect.height * window.devicePixelRatio;
+    firmaCtx = canvas.getContext('2d');
+    firmaCtx.scale(window.devicePixelRatio, window.devicePixelRatio);
+    firmaCtx.strokeStyle = '#e8edf2';
+    firmaCtx.lineWidth   = 2.5;
+    firmaCtx.lineCap     = 'round';
+    firmaCtx.lineJoin    = 'round';
+    firmaTieneTrazos = false;
+
+    function getPos(e) {
+      const r = canvas.getBoundingClientRect();
+      const src = e.touches ? e.touches[0] : e;
+      return { x: src.clientX - r.left, y: src.clientY - r.top };
+    }
+    function start(e) {
+      e.preventDefault();
+      firmaActiva = true;
+      const p = getPos(e);
+      firmaCtx.beginPath();
+      firmaCtx.moveTo(p.x, p.y);
+      document.getElementById('firmaPlaceholder').style.display = 'none';
+    }
+    function move(e) {
+      e.preventDefault();
+      if (!firmaActiva) return;
+      const p = getPos(e);
+      firmaCtx.lineTo(p.x, p.y);
+      firmaCtx.stroke();
+      firmaTieneTrazos = true;
+      document.getElementById('firmaStatus').textContent = '✓ Firma registrada';
+      document.getElementById('firmaStatus').style.color = '#4caf50';
+    }
+    function end(e) { firmaActiva = false; }
+
+    canvas.addEventListener('mousedown',  start, { passive: false });
+    canvas.addEventListener('mousemove',  move,  { passive: false });
+    canvas.addEventListener('mouseup',    end);
+    canvas.addEventListener('mouseleave', end);
+    canvas.addEventListener('touchstart', start, { passive: false });
+    canvas.addEventListener('touchmove',  move,  { passive: false });
+    canvas.addEventListener('touchend',   end);
+  }
+
+  window.limpiarFirma = function() {
+    const canvas = document.getElementById('firmaCanvas');
+    if (!canvas || !firmaCtx) return;
+    firmaCtx.clearRect(0, 0, canvas.width, canvas.height);
+    firmaTieneTrazos = false;
+    document.getElementById('firmaPlaceholder').style.display = 'flex';
+    document.getElementById('firmaStatus').textContent = '';
+  };
+
+  function getFirmaBase64() {
+    const canvas = document.getElementById('firmaCanvas');
+    if (!canvas || !firmaTieneTrazos) return null;
+    return canvas.toDataURL('image/png');
+  }
+
+  // Iniciar firma cuando se muestra el tab recepción
+  function reinitFirmaOnShow() {
+    setTimeout(initFirma, 100);
   }
 
   window.cerrarAdmin = function() {
@@ -2113,6 +2326,9 @@
       if (tabEl) tabEl.classList.add('active');
       if (target === 'mapa') {
         setTimeout(function() { window.initMapa(); if (mapa) mapa.invalidateSize(); }, 100);
+      }
+      if (target === 'recepcion') {
+        setTimeout(initFirma, 150);
       }
     };
 
@@ -3228,8 +3444,12 @@
       <div class="form-separator-label" id="labelLlegada">🟦 Datos de llegada</div>
 
       <div class="form-group">
-        <label>Temp. Llegada (°C) *</label>
+        <label>🥩 Temp. Mercadería llegada (°C) *</label>
         <input type="number" id="tempLlegada" placeholder="ej: 3.1" step="0.1" oninput="checkHabilitarLlegada()">
+      </div>
+      <div class="form-group">
+        <label>🌡️ Temp. Camión llegada (°C) <span style="color:#888;font-size:11px;font-weight:400">(opcional)</span></label>
+        <input type="number" id="tempCamionLlegada" placeholder="ej: -18" step="0.1">
       </div>
       <div class="form-group timestamp-group">
         <label>Hora de Llegada</label>
@@ -3292,16 +3512,28 @@
         <label>Observaciones <span id="desvioDetalleLabel" style="color:#888;font-weight:400"></span></label>
         <textarea id="observaciones" placeholder="Novedades, incidentes, detalle del desvío…" style="min-height:80px"></textarea>
       </div>
+
+      <!-- FIRMA DIGITAL -->
+      <div class="form-group" style="grid-column:1/-1">
+        <label>✍️ Firma del receptor <span style="color:#888;font-size:11px;font-weight:400">(obligatoria)</span></label>
+        <div style="position:relative;background:var(--surface2);border:1.5px solid var(--border);border-radius:8px;overflow:hidden;touch-action:none">
+          <canvas id="firmaCanvas" style="display:block;width:100%;height:160px;cursor:crosshair;touch-action:none"></canvas>
+          <div id="firmaPlaceholder" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none">
+            <span style="color:#444;font-size:13px">Firmá aquí con el dedo o el mouse</span>
+          </div>
+        </div>
+        <div style="display:flex;gap:10px;margin-top:8px;align-items:center">
+          <button type="button" onclick="limpiarFirma()" style="background:transparent;border:1px solid var(--border);color:#888;font-size:12px;padding:6px 14px;border-radius:6px;cursor:pointer">🗑️ Borrar firma</button>
+          <span id="firmaStatus" style="font-size:12px;color:#888"></span>
+        </div>
+      </div>
     </div>
 
     <button class="btn-primary" id="btnGuardar" onclick="guardarEnvio()">✅ Guardar recepción completa</button>
   </div>
 
   <!-- Envíos del día completados -->
-  <div class="card" id="enviosDiaCard" style="margin-top:16px;display:none">
-    <div class="card-title">✅ Envíos registrados hoy</div>
-    <div id="enviosDiaLista"></div>
-  </div>
+
 </div>
 
 <!-- TAB: HISTORIAL -->
@@ -3354,6 +3586,7 @@
             <th>Duración</th>
             <th>Estado</th>
             <th>Desvíos</th>
+            <th>Archivos</th>
             
           </tr>
         </thead>
@@ -3371,7 +3604,7 @@
   <!-- Panel tracker -->
   <div class="card tracker-card">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
-      <div class="card-title" style="margin-bottom:0">🚛 Tracker en vivo — 30 km/h promedio</div>
+      <div class="card-title" style="margin-bottom:0">🚛 Tracker en vivo — tiempo estimado por ruta real</div>
       <button id="btnCentrarMapa" class="btn-centrar" onclick="centrarEnCamion()" title="Centrar mapa en el camión">
         🎯 Centrar
       </button>
