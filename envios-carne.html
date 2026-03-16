@@ -751,8 +751,7 @@
     document.getElementById('patente').value = e.patente || '';
     document.getElementById('observaciones').value = e.observaciones || '';
     // Restaurar select de desvíos
-    document.getElementById('desviosSeleccionados').value = e.desvios || '';
-    onDesvioChange();
+    cargarDesviosCheck(e.desvios || '');
     // Restaurar origen/destino
     if (e.origenId && document.getElementById('formOrigen')) document.getElementById('formOrigen').value = e.origenId;
     if (e.destinoId && document.getElementById('formDestino')) document.getElementById('formDestino').value = e.destinoId;
@@ -1194,8 +1193,7 @@
     // Limpiar campos de recepción
     document.getElementById('tempLlegada').value = '';
     document.getElementById('horaLlegada').value = '';
-    document.getElementById('desviosSeleccionados').value = '';
-    onDesvioChange();
+    limpiarDesviosCheck();
     document.getElementById('observaciones').value = '';
     renderEnviosEnTransito();
     // Scroll al formulario
@@ -1300,8 +1298,7 @@
     document.getElementById('fotoNombre').textContent = '';
     editandoId = null;
     document.getElementById('btnGuardar').textContent = 'Registrar Envío';
-    document.getElementById('desviosSeleccionados').value = '';
-    onDesvioChange();
+    limpiarDesviosCheck();
     window._fotoSalidaBase64 = null;
     window._fotoSalidaFile = null;
     window._salidaSinFoto = false;
@@ -1371,37 +1368,65 @@
     rechazo_parcial: '#ff9800', demora_entrega: '#888', otro: '#888'
   };
 
-  window.onDesvioChange = function() {
-    const val = document.getElementById('desviosSeleccionados').value;
-    const label = document.getElementById('desvioDetalleLabel');
-    const wrap = document.getElementById('desvioDetalleWrap');
-    const icono = document.getElementById('desvioIcono');
-    if (!val) {
-      if (label) label.textContent = '';
-      if (wrap) wrap.style.opacity = '0.5';
-      if (icono) icono.innerHTML = '';
-    } else {
-      const txt = DESVIOS_LABELS[val] || val;
-      const color = DESVIO_COLORES[val] || '#ff9800';
-      if (label) label.textContent = '— ' + txt;
-      if (wrap) { wrap.style.opacity = '1'; wrap.style.borderColor = color; }
-      if (icono) icono.innerHTML = '<span style="color:' + color + ';font-size:13px;font-weight:700">' + txt + '</span>';
-      // Si es "otro" hacer foco en observaciones
-      if (val === 'otro') setTimeout(function(){ document.getElementById('observaciones').focus(); }, 100);
+  window.onDesvioChange = function() {}; // compat — ya no se usa
+
+  window.onDesvioCheck = function() {
+    const checks = document.querySelectorAll('#desviosCheckboxWrap input[type=checkbox]:checked');
+    const vals = Array.from(checks).map(c => c.value);
+    // Actualizar hidden input (separado por coma)
+    document.getElementById('desviosSeleccionados').value = vals.join(',');
+    // Marcar estilo de cada label
+    document.querySelectorAll('#desviosCheckboxWrap .desvio-check').forEach(function(lbl) {
+      const cb = lbl.querySelector('input');
+      lbl.classList.toggle('checked', cb.checked);
+    });
+    // Resumen de badges debajo
+    const resumen = document.getElementById('desviosResumen');
+    if (resumen) {
+      resumen.innerHTML = vals.map(function(v) {
+        const color = DESVIO_COLORES[v] || '#ff9800';
+        const txt = (DESVIOS_LABELS[v] || v).replace(/[\u{1F300}-\u{1FFFF}]/gu,'').replace(/[\u2600-\u26FF]/gu,'').trim();
+        return '<span class="desvio-badge" style="background:rgba(255,152,0,0.1);border-color:' + color + ';color:' + color + '">' + txt + '</span>';
+      }).join('');
     }
+    if (vals.includes('otro')) setTimeout(function(){ document.getElementById('observaciones').focus(); }, 100);
   };
+
+  function limpiarDesviosCheck() {
+    document.querySelectorAll('#desviosCheckboxWrap input[type=checkbox]').forEach(function(cb) {
+      cb.checked = false;
+      cb.closest('.desvio-check').classList.remove('checked');
+    });
+    limpiarDesviosCheck();
+    const resumen = document.getElementById('desviosResumen');
+    if (resumen) resumen.innerHTML = '';
+  }
+
+  function cargarDesviosCheck(valStr) {
+    limpiarDesviosCheck();
+    if (!valStr) return;
+    const vals = valStr.split(',').map(v => v.trim()).filter(Boolean);
+    vals.forEach(function(v) {
+      const cb = document.querySelector('#desviosCheckboxWrap input[value="' + v + '"]');
+      if (cb) { cb.checked = true; cb.closest('.desvio-check').classList.add('checked'); }
+    });
+    document.getElementById('desviosSeleccionados').value = vals.join(',');
+    window.onDesvioCheck();
+  }
 
   function formatDesviosLabel(desvios) {
     if (!desvios) return '—';
-    return DESVIOS_LABELS[desvios] || desvios;
+    // Soporta múltiples separados por coma
+    return desvios.split(',').map(v => DESVIOS_LABELS[v.trim()] || v.trim()).join(' / ');
   }
 
   // Versión sin emojis para PDF/Excel
   function formatDesviosPlain(desvios) {
     if (!desvios) return '-';
-    const label = DESVIOS_LABELS[desvios] || desvios;
-    // Remover emojis y caracteres no-ASCII
-    return label.replace(/[^\x20-\x7E\xC0-\xFF]/g, '').trim() || desvios;
+    return desvios.split(',').map(function(v) {
+      const label = DESVIOS_LABELS[v.trim()] || v.trim();
+      return label.replace(/[^\x20-\x7E\xC0-\xFF]/g, '').trim();
+    }).filter(Boolean).join(' / ') || '-';
   }
 
   function textoPlano(str) {
@@ -1411,9 +1436,13 @@
 
   function renderDesviosBadges(desvios) {
     if (!desvios) return '<span style="color:#555;font-size:12px">—</span>';
-    const color = DESVIO_COLORES[desvios] || '#ff9800';
-    const txt = DESVIOS_LABELS[desvios] || desvios;
-    return '<span class="desvio-badge" style="background:rgba(255,152,0,0.1);border-color:' + color + ';color:' + color + '">' + txt + '</span>';
+    return desvios.split(',').map(function(v) {
+      v = v.trim();
+      if (!v) return '';
+      const color = DESVIO_COLORES[v] || '#ff9800';
+      const txt = DESVIOS_LABELS[v] || v;
+      return '<span class="desvio-badge" style="background:rgba(255,152,0,0.1);border-color:' + color + ';color:' + color + '">' + txt + '</span>';
+    }).join('');
   }
 
   window.checkHabilitarSalida = function() {
@@ -1442,7 +1471,9 @@
 
   window.registrarHoraSalida = function() {
     const temp = document.getElementById('tempSalida').value;
-    if (!temp) { mostrarToast('Ingresá la temperatura primero ⚠️', 'warn'); return; }
+    const tempMerc = document.getElementById('tempMercaderia').value;
+    if (!temp) { mostrarToast('Ingresá la temperatura del camión ⚠️', 'warn'); return; }
+    if (!tempMerc) { mostrarToast('Ingresá la temperatura de la mercadería ⚠️', 'warn'); return; }
     const camposReq = ['fecha','chofer','patente'];
     for (const c of camposReq) {
       if (!document.getElementById(c).value.trim()) {
@@ -1464,6 +1495,7 @@
       destinoId: dId,
       horaSalida: hora,
       tempSalida: temp,
+      tempMercaderia: tempMerc,
       fotoSalidaBase64: fotoBase64 || null,
       sinFotoEvidencia: !fotoBase64,
       sheetId: null
@@ -1497,6 +1529,7 @@
           destinoId:       envio.destinoId,
           horaSalida:      envio.horaSalida,
           tempSalida:      envio.tempSalida,
+          tempMercaderia:  envio.tempMercaderia || '',
           horaLlegada:     '',
           tempLlegada:     '',
           desvios:         '',
@@ -1545,7 +1578,8 @@
     const textoPlanoWA =
       'SALIDA CONFIRMADA - Suc. ' + envio.origenId + '\n' +
       'Chofer: ' + envio.chofer.trim() + ' | Patente: ' + envio.patente.trim() + '\n' +
-      'Hora: ' + envio.horaSalida + ' | Temp: ' + envio.tempSalida + 'C\n' +
+      'Hora: ' + envio.horaSalida + '\n' +
+      'Temp. Camion: ' + envio.tempSalida + 'C | Temp. Mercaderia: ' + (envio.tempMercaderia || '-') + 'C\n' +
       'Destino: Suc. ' + envio.destinoId + ' - ' + (dSuc.direccion || '').trim() + '\n\n' +
       '>> NO OLVIDAR RECEPCIONAR <<';
 
@@ -1602,6 +1636,7 @@
     document.getElementById('chofer').value = '';
     document.getElementById('patente').value = '';
     document.getElementById('tempSalida').value = '';
+    document.getElementById('tempMercaderia') && (document.getElementById('tempMercaderia').value = '');
     document.getElementById('horaSalida').value = '';
     fotoBase64 = null; window._fotoFile = null;
     document.getElementById('fotoPreview').style.display = 'none';
@@ -2679,6 +2714,24 @@
   #desvioDetalleWrap {
     transition: opacity 0.2s, border-color 0.2s;
   }
+  .desvio-check {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--text-muted);
+    transition: background 0.15s;
+    user-select: none;
+  }
+  .desvio-check:hover { background: var(--surface3); color: var(--text); }
+  .desvio-check input[type=checkbox] {
+    width: 16px; height: 16px; accent-color: var(--accent);
+    cursor: pointer; flex-shrink: 0;
+  }
+  .desvio-check.checked { background: rgba(230,57,70,0.08); color: var(--text); }
   .desvio-badge {
     display: inline-block;
     padding: 2px 8px;
@@ -3127,8 +3180,12 @@
 
       <div class="form-separator-label" id="labelSalida">🟥 Datos de salida</div>
       <div class="form-group">
-        <label>Temp. Salida (°C) *</label>
-        <input type="number" id="tempSalida" placeholder="ej: 2.5" step="0.1" oninput="checkHabilitarSalida()">
+        <label>🌡️ Temp. Camión (°C) *</label>
+        <input type="number" id="tempSalida" placeholder="ej: -18" step="0.1" oninput="checkHabilitarSalida()">
+      </div>
+      <div class="form-group">
+        <label>🥩 Temp. Mercadería (°C) *</label>
+        <input type="number" id="tempMercaderia" placeholder="ej: -15" step="0.1" oninput="checkHabilitarSalida()">
       </div>
 
       <div class="form-group" style="grid-column:1/-1">
@@ -3196,38 +3253,38 @@
       <div class="form-separator-label" style="grid-column:1/-1">⚠️ Desvíos y Observaciones</div>
 
       <div class="form-group" style="grid-column:1/-1">
-        <label>¿Hubo algún problema con la carne? <span style="color:#888;font-size:11px;font-weight:400">(completar en destino)</span></label>
-        <div class="desvio-select-wrap">
-          <select id="desviosSeleccionados" class="desvio-select" onchange="onDesvioChange()">
-            <option value="">— Sin desvíos —</option>
-            <optgroup label="🌡️ Temperatura">
-              <option value="temp_alta_llegada">Temperatura alta al llegar</option>
-              <option value="temp_fuera_rango">Temperatura fuera de rango en tránsito</option>
-              <option value="cadena_frio_rota">Cadena de frío comprometida</option>
-              <option value="producto_congelado">Producto llegó parcialmente congelado</option>
-            </optgroup>
-            <optgroup label="🥩 Calidad del producto">
-              <option value="color_anormal">Color anormal de la carne</option>
-              <option value="olor_anormal">Olor anormal / putrefacción</option>
-              <option value="textura_anormal">Textura o consistencia anormal</option>
-              <option value="producto_danado">Producto golpeado o dañado físicamente</option>
-              <option value="fecha_vencimiento">Problema con fecha de vencimiento</option>
-            </optgroup>
-            <optgroup label="📦 Embalaje y entrega">
-              <option value="embalaje_roto">Embalaje roto o abierto</option>
-              <option value="embalaje_sucio">Embalaje sucio o contaminado</option>
-              <option value="faltante_bultos">Faltante de bultos</option>
-              <option value="exceso_bultos">Exceso de bultos / error de carga</option>
-              <option value="producto_incorrecto">Producto incorrecto recibido</option>
-            </optgroup>
-            <optgroup label="🚫 Recepción">
-              <option value="rechazo_total">Rechazo total del lote</option>
-              <option value="rechazo_parcial">Rechazo parcial del lote</option>
-              <option value="demora_entrega">Demora excesiva en la entrega</option>
-            </optgroup>
-            <option value="otro">📝 Otro (especificar en observaciones)</option>
-          </select>
-          <div id="desvioIcono" class="desvio-icono"></div>
+        <label>¿Hubo algún problema? <span style="color:#888;font-size:11px;font-weight:400">Podés marcar más de uno</span></label>
+        <input type="hidden" id="desviosSeleccionados">
+        <div id="desviosCheckboxWrap" style="background:var(--surface2);border:1.5px solid var(--border);border-radius:8px;padding:12px;display:flex;flex-direction:column;gap:4px">
+
+          <div style="font-size:11px;color:#888;font-weight:600;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">🌡️ Temperatura</div>
+          <label class="desvio-check"><input type="checkbox" value="temp_alta_llegada" onchange="onDesvioCheck()"> Temperatura alta al llegar</label>
+          <label class="desvio-check"><input type="checkbox" value="temp_fuera_rango" onchange="onDesvioCheck()"> Temperatura fuera de rango</label>
+          <label class="desvio-check"><input type="checkbox" value="cadena_frio_rota" onchange="onDesvioCheck()"> Cadena de frío comprometida</label>
+          <label class="desvio-check"><input type="checkbox" value="producto_congelado" onchange="onDesvioCheck()"> Producto parcialmente congelado</label>
+
+          <div style="font-size:11px;color:#888;font-weight:600;text-transform:uppercase;letter-spacing:1px;margin-top:8px;margin-bottom:4px">🥩 Calidad del producto</div>
+          <label class="desvio-check"><input type="checkbox" value="color_anormal" onchange="onDesvioCheck()"> Color anormal de la carne</label>
+          <label class="desvio-check"><input type="checkbox" value="olor_anormal" onchange="onDesvioCheck()"> Olor anormal / putrefacción</label>
+          <label class="desvio-check"><input type="checkbox" value="textura_anormal" onchange="onDesvioCheck()"> Textura o consistencia anormal</label>
+          <label class="desvio-check"><input type="checkbox" value="producto_danado" onchange="onDesvioCheck()"> Producto aplastado o dañado físicamente</label>
+          <label class="desvio-check"><input type="checkbox" value="fecha_vencimiento" onchange="onDesvioCheck()"> Problema con fecha de vencimiento</label>
+
+          <div style="font-size:11px;color:#888;font-weight:600;text-transform:uppercase;letter-spacing:1px;margin-top:8px;margin-bottom:4px">📦 Embalaje y entrega</div>
+          <label class="desvio-check"><input type="checkbox" value="embalaje_roto" onchange="onDesvioCheck()"> Embalaje roto o abierto</label>
+          <label class="desvio-check"><input type="checkbox" value="embalaje_sucio" onchange="onDesvioCheck()"> Embalaje sucio o contaminado</label>
+          <label class="desvio-check"><input type="checkbox" value="faltante_bultos" onchange="onDesvioCheck()"> Faltante de mercadería</label>
+          <label class="desvio-check"><input type="checkbox" value="exceso_bultos" onchange="onDesvioCheck()"> Exceso de bultos / error de carga</label>
+          <label class="desvio-check"><input type="checkbox" value="producto_incorrecto" onchange="onDesvioCheck()"> Producto incorrecto recibido</label>
+
+          <div style="font-size:11px;color:#888;font-weight:600;text-transform:uppercase;letter-spacing:1px;margin-top:8px;margin-bottom:4px">🚫 Recepción</div>
+          <label class="desvio-check"><input type="checkbox" value="rechazo_total" onchange="onDesvioCheck()"> Rechazo total del lote</label>
+          <label class="desvio-check"><input type="checkbox" value="rechazo_parcial" onchange="onDesvioCheck()"> Rechazo parcial del lote</label>
+          <label class="desvio-check"><input type="checkbox" value="demora_entrega" onchange="onDesvioCheck()"> Demora excesiva en la entrega</label>
+          <label class="desvio-check"><input type="checkbox" value="otro" onchange="onDesvioCheck()"> Otro (especificar en observaciones)</label>
+        </div>
+        <div id="desviosResumen" style="margin-top:8px;display:flex;flex-wrap:wrap;gap:6px"></div>
+        <div id="desvioIcono" class="desvio-icono" style="display:none"></div>
         </div>
       </div>
 
