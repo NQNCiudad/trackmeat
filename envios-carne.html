@@ -31,6 +31,7 @@
   };
 
   function cargarConfigSucursales() {
+    // Primero intenta localStorage como cache, luego Sheet al iniciar
     try {
       const saved = localStorage.getItem('suc_config');
       if (saved) return JSON.parse(saved);
@@ -38,8 +39,46 @@
     return JSON.parse(JSON.stringify(SUCURSALES_DEFAULT));
   }
 
-  function guardarConfigSucursales(cfg) {
+  async function guardarConfigSucursales(cfg) {
+    // Guardar en localStorage (cache local)
     localStorage.setItem('suc_config', JSON.stringify(cfg));
+    // Guardar en Sheet (para todos los dispositivos)
+    await subirConfigASheet();
+  }
+
+  async function subirConfigASheet() {
+    try {
+      const configObj = {
+        sys_empresa: localStorage.getItem('sys_empresa') || 'LA ANÓNIMA',
+        sys_nombre:  localStorage.getItem('sys_nombre')  || 'Sistema de Entregas',
+        sys_color:   localStorage.getItem('sys_color')   || '#e63946',
+        suc_config:  localStorage.getItem('suc_config')  || JSON.stringify(SUCURSALES_DEFAULT)
+      };
+      await gasCall({ accion: 'guardarConfig', config: JSON.stringify(configObj) });
+    } catch(e) { console.warn('No se pudo guardar config en Sheet:', e); }
+  }
+
+  async function cargarConfigDesdeSheet() {
+    try {
+      const res = await gasGet('leerConfig');
+      if (!res || !res.config) return;
+      const cfg = res.config;
+      if (cfg.sys_empresa) localStorage.setItem('sys_empresa', cfg.sys_empresa);
+      if (cfg.sys_nombre)  localStorage.setItem('sys_nombre',  cfg.sys_nombre);
+      if (cfg.sys_color)   localStorage.setItem('sys_color',   cfg.sys_color);
+      if (cfg.suc_config) {
+        localStorage.setItem('suc_config', cfg.suc_config);
+        SUCURSALES = JSON.parse(cfg.suc_config);
+        actualizarRutaBadge();
+        poblarSelectsFormulario();
+        poblarFiltroSucursal();
+      }
+      // Actualizar header con nombre del sistema
+      const emp = cfg.sys_empresa || 'LA ANÓNIMA';
+      const nom = cfg.sys_nombre  || 'Sistema de Entregas';
+      const col = cfg.sys_color   || '#e63946';
+      aplicarIdentidad(emp, nom, col);
+    } catch(e) { console.warn('No se pudo cargar config desde Sheet:', e); }
   }
 
   let SUCURSALES = cargarConfigSucursales();
@@ -60,6 +99,13 @@
   }
   function getSucOrigen()  { return getSucActiva('origen');  }
   function getSucDestino() { return getSucActiva('destino'); }
+
+  function aplicarIdentidad(empresa, nombre, color) {
+    if (empresa) localStorage.setItem('sys_empresa', empresa);
+    if (nombre)  localStorage.setItem('sys_nombre', nombre);
+    if (color)   localStorage.setItem('sys_color', color);
+    actualizarRutaBadge();
+  }
 
   function actualizarRutaBadge() {
     const o = getSucOrigen();
@@ -525,6 +571,8 @@
     poblarFiltroSucursal();
     cargarEnviosLS();
     if (window._splashRemove) window._splashRemove();
+    // Cargar config global desde Sheet (sucursales + nombre sistema)
+    cargarConfigDesdeSheet();
   }
 
   window.guardarEnvio = async function() {
@@ -1812,7 +1860,7 @@
     if (prevSub) prevSub.textContent = sub;
   }
 
-  window.guardarNombreSistema = function() {
+  window.guardarNombreSistema = async function() {
     const empresa = document.getElementById('adminEmpresa').value.trim();
     const nombre  = document.getElementById('adminSysNombre').value.trim();
     const color   = document.getElementById('adminColor').value;
@@ -1821,8 +1869,8 @@
     if (nombre)  localStorage.setItem('sys_nombre', nombre);
     if (color)   localStorage.setItem('sys_color', color);
     actualizarRutaBadge();
-    // Actualizar también encabezados de reportes
-    mostrarToast('Identidad actualizada ✓', 'ok');
+    await subirConfigASheet();
+    mostrarToast('Identidad actualizada y sincronizada ✓', 'ok');
   };
 
   window.cambiarContrasena = async function() {
@@ -1930,7 +1978,7 @@
     editandoSucId = null;
   };
 
-  window.guardarSucursal = function() {
+  window.guardarSucursal = async function() {
     const id  = document.getElementById('aSucId').value.trim();
     const dir = document.getElementById('aSucDir').value.trim();
     const lat = parseFloat(document.getElementById('aSucLat').value);
@@ -1945,7 +1993,7 @@
       mostrarToast('Coordenadas inválidas ⚠️', 'warn'); return;
     }
     SUCURSALES[id] = { lat, lng, label: 'Suc. ' + id + ' — ' + dir, direccion: dir, color, rol, tel };
-    guardarConfigSucursales(SUCURSALES);
+    await guardarConfigSucursales(SUCURSALES);
     cerrarFormSucursal();
     renderAdminSucList();
     actualizarRutaBadge();
@@ -1954,10 +2002,10 @@
     mostrarToast('Sucursal guardada ✓', 'ok');
   };
 
-  window.eliminarSucursal = function(id) {
+  window.eliminarSucursal = async function(id) {
     if (!confirm('¿Eliminás la sucursal ' + id + '?')) return;
     delete SUCURSALES[id];
-    guardarConfigSucursales(SUCURSALES);
+    await guardarConfigSucursales(SUCURSALES);
     renderAdminSucList();
     actualizarRutaBadge();
     if (mapa) { mapa.remove(); mapa = null; marcadorCamion = null; rutaCoords = []; }
