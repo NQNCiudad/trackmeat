@@ -2326,25 +2326,15 @@
 
   // Redimensionar imagen a max 800px para reducir tamaño base64
   function resizarImagen(base64, maxPx, callback) {
-    const img = new Image();
-    img.onload = function() {
-      const canvas = document.createElement('canvas');
-      let w = img.width, h = img.height;
-      if (w > maxPx || h > maxPx) {
-        if (w > h) { h = Math.round(h * maxPx / w); w = maxPx; }
-        else       { w = Math.round(w * maxPx / h); h = maxPx; }
-      }
-      canvas.width = w; canvas.height = h;
-      canvas.getContext('2d').drawImage(img, 0, 0, w, h);
-      callback(canvas.toDataURL('image/jpeg', 0.75));
-    };
-    img.onerror = function() { callback(base64); }; // fallback sin resize
-    img.src = base64;
+    // Simplificado: devolver directo sin resize para debug
+    console.log('[FOTO] resizarImagen llamada, largo input:', base64 ? base64.length : 'null');
+    callback(base64);
   }
 
     document.getElementById('fotoInput').addEventListener('change', function(e) {
       const file = e.target.files[0];
       if (!file) return;
+      console.log('[FOTO] archivo seleccionado:', file.name, file.size);
       window._fotoFile = file;
       document.getElementById('fotoNombre').textContent = file.name;
       const reader = new FileReader();
