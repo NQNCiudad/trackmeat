@@ -576,15 +576,13 @@
       // Solo subir foto salida si es un registro nuevo (no edición de recepción)
       params.fotoSalidaBase64   = (body.accion === 'guardar') ? (d.fotoSalidaUrl || '') : '';
       params.fotoBase64         = d.fotoUrl          || '';
-      params.firmaBase64        = d.firmaBase64      || '';
+      // firmaBase64 NO se manda al servidor — solo se usa localmente en el PDF
     }
     // Separar imágenes para no superar límite de URL en GET
     const imgs = {
       fotoSalidaBase64: params.fotoSalidaBase64 || '',
       fotoBase64:       params.fotoBase64       || '',
     };
-    // Firma va directo en el GET normal (es pequeña ~5KB)
-    // params.firmaBase64 se manda con el resto de los datos
     delete params.fotoSalidaBase64;
     delete params.fotoBase64;
     // Primero guardar datos
@@ -1215,7 +1213,7 @@
     document.getElementById('totalEnvios').textContent = filtrados.length;
 
     if (!filtrados.length) {
-      tbody.innerHTML = `<tr><td colspan="9" style="text-align:center;padding:32px;color:#888">Sin registros para el período seleccionado</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="11" style="text-align:center;padding:32px;color:#888">Sin registros para el período seleccionado</td></tr>`;
       return;
     }
 
