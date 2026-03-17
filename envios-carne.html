@@ -582,17 +582,17 @@
     const imgs = {
       fotoSalidaBase64: params.fotoSalidaBase64 || '',
       fotoBase64:       params.fotoBase64       || '',
-      firmaBase64:      params.firmaBase64      || '',
     };
+    // Firma va directo en el GET normal (es pequeña ~5KB)
+    // params.firmaBase64 se manda con el resto de los datos
     delete params.fotoSalidaBase64;
     delete params.fotoBase64;
-    delete params.firmaBase64;
     // Primero guardar datos
     const res = await gasCall(params);
     // Luego subir imágenes si hay y si el servidor devolvió un ID
     const idUsado = (res && res.id) ? res.id : params.id;
-    console.log('[IMG] idUsado:', idUsado, '| fotoSal:', !!imgs.fotoSalidaBase64, '| fotoLleg:', !!imgs.fotoBase64, '| firma:', !!imgs.firmaBase64);
-    if (idUsado && (imgs.fotoSalidaBase64 || imgs.fotoBase64 || imgs.firmaBase64)) {
+    console.log('[IMG] idUsado:', idUsado, '| fotoSal:', !!imgs.fotoSalidaBase64, '| fotoLleg:', !!imgs.fotoBase64);
+    if (idUsado && (imgs.fotoSalidaBase64 || imgs.fotoBase64)) {
       await subirImagenesGAS(idUsado, imgs);
     }
     return res;
@@ -602,7 +602,7 @@
     const tipos = [
       { key: 'fotoSalidaBase64', tipo: 'fotoSalida',  label: 'foto salida'  },
       { key: 'fotoBase64',       tipo: 'fotoLlegada', label: 'foto llegada' },
-      { key: 'firmaBase64',      tipo: 'firma',       label: 'firma'        },
+      // firma NO sube a Drive — se guarda directo en Sheet (es pequeña)
     ];
     const total = tipos.filter(t => imgs[t.key]).length;
     let done = 0;
@@ -1727,6 +1727,7 @@
         if (res && res.id) {
           envio.sheetId = res.id;
         }
+        await new Promise(r => setTimeout(r, 1500)); // esperar que Drive actualice Sheet
         await cargarEnvios();
       } catch(e) { console.error('Error guardando salida:', e); }
     })(nuevoEnvio);
