@@ -668,13 +668,7 @@
       return;
     }
 
-    // Validar firma
-    if (!firmaTieneTrazos) {
-      mostrarToast('La firma del receptor es obligatoria ✍️', 'warn');
-      document.getElementById('firmaCanvas').scrollIntoView({ behavior: 'smooth' });
-      return;
-    }
-    const firmaBase64 = getFirmaBase64();
+    const firmaBase64 = null;
 
     // Modal de confirmación con sucursal receptora
     const ec = window._envioActivoSeleccionado || window._envioEnCurso;
@@ -1222,8 +1216,8 @@
       const tempDiff = parseFloat(e.tempLlegada) - parseFloat(e.tempSalida);
       const alerta = tempDiff > 2;
       const iconos = [
-        e.urlFotoSalida  ? `<a href="${e.urlFotoSalida}"  target="_blank" title="📷 Foto salida"  style="color:#2196f3;font-size:16px;text-decoration:none">📷</a>` : '',
-        e.urlFotoLlegada ? `<a href="${e.urlFotoLlegada}" target="_blank" title="🖼️ Foto llegada" style="color:#4caf50;font-size:16px;text-decoration:none">🖼️</a>` : '',
+        e.urlFotoSalida  ? `<a href="${e.urlFotoSalida}"  target="_blank" title="Foto salida"  style="color:#2196f3;font-size:16px;text-decoration:none">📤</a>` : '',
+        e.urlFotoLlegada ? `<a href="${e.urlFotoLlegada}" target="_blank" title="Foto llegada" style="color:#4caf50;font-size:16px;text-decoration:none">📥</a>` : '',
         e.urlFirma       ? `<a href="${e.urlFirma}"       target="_blank" title="✍️ Firma"        style="color:#ff9800;font-size:16px;text-decoration:none">✍️</a>` : '',
       ].filter(Boolean).join(' ');
       return `
@@ -1236,7 +1230,7 @@
           <td><span class="badge badge-in">${e.horaLlegada || '—'}</span></td>
           <td><span class="temp ${alerta ? 'temp-warn' : ''}">${e.tempLlegada}°C</span></td>
           <td>${dur}</td>
-          <td>${alerta ? '<span class="status warn">⚠️ Revisar</span>' : '<span class="status ok">✓ OK</span>'}</td>
+          <td>${alerta ? '<span class="status warn" title="Diferencia de temperatura supera 2°C">⚠️ Temp. Alta</span>' : '<span class="status ok" title="Temperatura dentro del rango">✓ Temp. OK</span>'}</td>
           <td>${renderDesviosBadges(e.desvios)}</td>
           <td style="white-space:nowrap">${iconos || '—'}</td>
         </tr>`;
@@ -2384,9 +2378,7 @@
       if (target === 'mapa') {
         setTimeout(function() { window.initMapa(); if (mapa) mapa.invalidateSize(); }, 100);
       }
-      if (target === 'recepcion') {
-        setTimeout(initFirma, 150);
-      }
+
     };
 
     document.querySelectorAll('.tab-btn').forEach(btn => {
@@ -3569,23 +3561,6 @@
         <label>Observaciones <span id="desvioDetalleLabel" style="color:#888;font-weight:400"></span></label>
         <textarea id="observaciones" placeholder="Novedades, incidentes, detalle del desvío…" style="min-height:80px"></textarea>
       </div>
-
-      <!-- FIRMA DIGITAL -->
-      <div class="form-group" style="grid-column:1/-1">
-        <label>✍️ Firma del receptor <span style="color:#888;font-size:11px;font-weight:400">(obligatoria)</span></label>
-        <div style="position:relative;background:var(--surface2);border:1.5px solid var(--border);border-radius:8px;overflow:hidden;touch-action:none">
-          <canvas id="firmaCanvas" style="display:block;width:100%;height:160px;cursor:crosshair;touch-action:none"></canvas>
-          <div id="firmaPlaceholder" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none">
-            <span style="color:#444;font-size:13px">Firmá aquí con el dedo o el mouse</span>
-          </div>
-        </div>
-        <div style="display:flex;gap:10px;margin-top:8px;align-items:center">
-          <button type="button" onclick="limpiarFirma()" style="background:transparent;border:1px solid var(--border);color:#888;font-size:12px;padding:6px 14px;border-radius:6px;cursor:pointer">🗑️ Borrar firma</button>
-          <span id="firmaStatus" style="font-size:12px;color:#888"></span>
-        </div>
-      </div>
-    </div>
-
     <button class="btn-primary" id="btnGuardar" onclick="guardarEnvio()">✅ Guardar recepción completa</button>
   </div>
 
@@ -3641,7 +3616,7 @@
             <th>Llegada</th>
             <th>Temp. Lleg.</th>
             <th>Duración</th>
-            <th>Estado</th>
+            <th title="Estado de la cadena de frío según diferencia de temperatura">Estado Temp. 🌡️</th>
             <th>Desvíos</th>
             <th>Archivos</th>
             
