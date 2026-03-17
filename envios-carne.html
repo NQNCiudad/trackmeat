@@ -587,24 +587,24 @@
     for (const t of tipos) {
       if (!imgs[t.key]) continue;
       try {
-        console.log('[UPLOAD] subiendo', t.tipo, 'para id', id, 'largo:', imgs[t.key].length);
-        const body = new URLSearchParams({
+        console.log('[UPLOAD] subiendo', t.tipo, 'largo:', imgs[t.key].length);
+        const payload = JSON.stringify({
           accion: 'subirArchivo',
           id: id,
           tipo: t.tipo,
           data: imgs[t.key]
         });
-        // no-cors: el browser envía el POST pero no lee la respuesta (evita CORS error)
-        await fetch(GAS_URL, {
+        const res = await fetch(GAS_URL, {
           method: 'POST',
-          mode: 'no-cors',
-          body: body
+          headers: { 'Content-Type': 'application/json' },
+          body: payload,
+          redirect: 'follow'
         });
-        console.log('[UPLOAD] enviado', t.tipo);
-        // Esperar un poco entre uploads
-        await new Promise(r => setTimeout(r, 1500));
+        const text = await res.text();
+        console.log('[UPLOAD] respuesta', t.tipo, text.slice(0, 100));
+        await new Promise(r => setTimeout(r, 1000));
       } catch(e) {
-        console.warn('[UPLOAD] error', t.tipo, e);
+        console.warn('[UPLOAD] error', t.tipo, e.message);
       }
     }
   }
