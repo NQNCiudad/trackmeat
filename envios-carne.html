@@ -230,8 +230,68 @@
     const minAhora = ahora.getHours()*60 + ahora.getMinutes();
     const rutasKeys = Object.keys(rutasMulti);
 
-    if (!rutasKeys.length) {
+    // ── FALLBACK: si no hay rutas OSRM pero hay envíos en tránsito, igual mostrar tracker ──
+    const enviosT = window._enviosEnCurso || [];
+    if (!rutasKeys.length && !enviosT.length) {
       panel.innerHTML = '<span style="color:#666;font-size:13px">Sin envío activo. Registrá una salida para ver el tracker.</span>';
+      return;
+    }
+
+    // Si hay envíos pero OSRM no cargó aún, construir entradas sintéticas con Haversine
+    if (!rutasKeys.length && enviosT.length) {
+      let html = '';
+      enviosT.forEach(function(envio) {
+        if (!envio || !envio.horaSalida) return;
+        const oSuc = SUCURSALES[envio.origenId] || {};
+        const dSuc = SUCURSALES[envio.destinoId] || {};
+        const distFallback = (oSuc.lat && dSuc.lat)
+          ? haversine([oSuc.lat, oSuc.lng], [dSuc.lat, dSuc.lng]) * 1.35  // factor de ruta real ~35%
+          : 2.0;
+        const tiempoRutaMin = Math.round((distFallback / VEL_KMH) * 60);
+        const minSalida = horaAMin(envio.horaSalida);
+        const etaMin = minSalida + tiempoRutaMin;
+        const minTranscurridos = minAhora - minSalida;
+        const progresoReal = tiempoRutaMin > 0 ? minTranscurridos / tiempoRutaMin : 0;
+        const progreso = Math.min(progresoReal, 0.90);
+        const kmRecorrido = progreso * distFallback;
+        const minRestantes = Math.round((1 - progreso) * tiempoRutaMin);
+        const etaActual = minAhora + minRestantes;
+        const etaActualHora = minAHora(etaActual);
+        const demoraVsETA = etaActual - Math.round(etaMin);
+        const pct = Math.min(100, Math.round(progreso * 100));
+
+        let estadoColor, estadoTexto, estadoBg;
+        if (minTranscurridos < 0) {
+          estadoColor = '#888'; estadoTexto = 'AÚN NO SALIÓ'; estadoBg = 'rgba(128,128,128,0.1)';
+        } else if (kmRecorrido >= distFallback) {
+          estadoColor = '#ff9800'; estadoTexto = 'DEBERÍA HABER LLEGADO'; estadoBg = 'rgba(255,152,0,0.15)';
+        } else if (demoraVsETA <= 2) {
+          estadoColor = '#4caf50'; estadoTexto = 'EN CAMINO · A TIEMPO'; estadoBg = 'rgba(76,175,80,0.1)';
+        } else {
+          estadoColor = '#ff9800'; estadoTexto = 'DEMORADO +' + demoraVsETA + ' min'; estadoBg = 'rgba(255,152,0,0.12)';
+        }
+
+        html +=
+          '<div style="margin-bottom:12px;padding-bottom:12px;border-bottom:1px solid var(--border)">' +
+          '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">' +
+            '<span style="background:#e63946;color:#fff;padding:1px 7px;border-radius:4px;font-size:11px;font-weight:700">' + envio.patente + '</span>' +
+            '<span style="color:#aaa;font-size:11px">Suc.' + envio.origenId + ' → Suc.' + envio.destinoId + '</span>' +
+            '<span style="color:#888;font-size:11px">' + envio.chofer + '</span>' +
+            '<span style="color:#555;font-size:10px">(est. lineal)</span>' +
+          '</div>' +
+          '<div class="tracker-row">' +
+            '<span class="tracker-badge" style="background:' + estadoBg + ';color:' + estadoColor + '">' + estadoTexto + '</span>' +
+            '<span>Salida: <b>' + envio.horaSalida + '</b></span>' +
+            '<span>ETA: <b style="color:' + estadoColor + '">' + etaActualHora + '</b></span>' +
+            '<span style="color:#aaa">' + kmRecorrido.toFixed(1) + ' / ' + distFallback.toFixed(1) + ' km</span>' +
+          '</div>' +
+          '<div class="tracker-barra-wrap" style="margin-top:6px">' +
+            '<div class="tracker-barra-fill" style="width:' + pct + '%;background:' + estadoColor + '"></div>' +
+            '<span class="tracker-barra-pct">' + pct + '%</span>' +
+          '</div>' +
+          '</div>';
+      });
+      panel.innerHTML = html || '<span style="color:#666;font-size:13px">Sin envío activo.</span>';
       return;
     }
 
