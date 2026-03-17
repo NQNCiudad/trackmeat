@@ -2338,6 +2338,7 @@
       canvas.getContext('2d').drawImage(img, 0, 0, w, h);
       callback(canvas.toDataURL('image/jpeg', 0.75));
     };
+    img.onerror = function() { callback(base64); }; // fallback sin resize
     img.src = base64;
   }
 
