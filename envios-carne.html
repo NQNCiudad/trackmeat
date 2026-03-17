@@ -572,6 +572,7 @@
     const res = await gasCall(params);
     // Luego subir imágenes si hay y si el servidor devolvió un ID
     const idUsado = (res && res.id) ? res.id : params.id;
+    console.log('[IMG] idUsado:', idUsado, '| fotoSal:', !!imgs.fotoSalidaBase64, '| fotoLleg:', !!imgs.fotoBase64, '| firma:', !!imgs.firmaBase64);
     if (idUsado && (imgs.fotoSalidaBase64 || imgs.fotoBase64 || imgs.firmaBase64)) {
       await subirImagenesGAS(idUsado, imgs);
     }
@@ -1693,7 +1694,8 @@
           tempLlegada:     '',
           desvios:         '',
           observaciones:   '',
-          sinFotoEvidencia: envio.sinFotoEvidencia
+          sinFotoEvidencia: envio.sinFotoEvidencia,
+          fotoSalidaUrl:   envio.fotoSalidaBase64 || window._fotoSalidaBase64 || ''
         }});
         if (res && res.id) {
           envio.sheetId = res.id;
