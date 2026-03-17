@@ -16,6 +16,24 @@
   // ============================================================
   const GAS_URL = "https://script.google.com/macros/s/AKfycbxGrCUtXWav-jBSmpm_8ikwafaFsGHvhvfqNwuMjapn3LpldnxLVNbHgw5tCz9pGoPm/exec";
 
+  // Función global — disponible en todo el script
+  function resizarImagen(base64, maxPx, callback) {
+    const img = new Image();
+    img.onload = function() {
+      const canvas = document.createElement('canvas');
+      let w = img.width, h = img.height;
+      if (w > maxPx || h > maxPx) {
+        if (w > h) { h = Math.round(h * maxPx / w); w = maxPx; }
+        else       { w = Math.round(w * maxPx / h); h = maxPx; }
+      }
+      canvas.width = w; canvas.height = h;
+      canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+      callback(canvas.toDataURL('image/jpeg', 0.75));
+    };
+    img.onerror = function() { callback(base64); };
+    img.src = base64;
+  }
+
   let envios = [];
   let editandoId = null;
   let fotoBase64 = null;
@@ -1553,7 +1571,7 @@
       cb.checked = false;
       cb.closest('.desvio-check').classList.remove('checked');
     });
-    limpiarDesviosCheck();
+    document.getElementById('desviosSeleccionados').value = '';
     const resumen = document.getElementById('desviosResumen');
     if (resumen) resumen.innerHTML = '';
   }
@@ -2326,13 +2344,6 @@
     document.getElementById('btnLlegada').classList.add('disabled');
     document.getElementById('btnSalida').disabled = true;
     document.getElementById('btnSalida').classList.add('disabled');
-
-  // Redimensionar imagen a max 800px para reducir tamaño base64
-  function resizarImagen(base64, maxPx, callback) {
-    // Simplificado: devolver directo sin resize para debug
-    console.log('[FOTO] resizarImagen llamada, largo input:', base64 ? base64.length : 'null');
-    callback(base64);
-  }
 
     document.getElementById('fotoInput').addEventListener('change', function(e) {
       const file = e.target.files[0];
