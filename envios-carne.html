@@ -559,28 +559,54 @@
       params.fotoBase64         = d.fotoUrl          || '';
       params.firmaBase64        = d.firmaBase64      || '';
     }
-    // Usar POST si hay imágenes (base64 es muy largo para GET)
-    const tieneImagenes = params.fotoSalidaBase64 || params.fotoBase64 || params.firmaBase64;
-    if (tieneImagenes) {
-      return gasCallPost(params);
+    // Separar imágenes para no superar límite de URL en GET
+    const imgs = {
+      fotoSalidaBase64: params.fotoSalidaBase64 || '',
+      fotoBase64:       params.fotoBase64       || '',
+      firmaBase64:      params.firmaBase64      || '',
+    };
+    delete params.fotoSalidaBase64;
+    delete params.fotoBase64;
+    delete params.firmaBase64;
+    // Primero guardar datos
+    const res = await gasCall(params);
+    // Luego subir imágenes si hay y si el servidor devolvió un ID
+    const idUsado = (res && res.id) ? res.id : params.id;
+    if (idUsado && (imgs.fotoSalidaBase64 || imgs.fotoBase64 || imgs.firmaBase64)) {
+      await subirImagenesGAS(idUsado, imgs);
     }
-    return gasCall(params);
+    return res;
   }
 
-  async function gasCallPost(params) {
-    const url = GAS_URL;
-    const body = Object.entries(params)
-      .map(([k,v]) => encodeURIComponent(k) + '=' + encodeURIComponent(String(v === null || v === undefined ? '' : v)))
-      .join('&');
-    const r = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body,
-      redirect: 'follow'
-    });
-    const text = await r.text();
-    try { return JSON.parse(text); }
-    catch(e) { throw new Error('Respuesta inválida: ' + text.slice(0,200)); }
+  async function subirImagenesGAS(id, imgs) {
+    const tipos = [
+      { key: 'fotoSalidaBase64', tipo: 'fotoSalida'  },
+      { key: 'fotoBase64',       tipo: 'fotoLlegada' },
+      { key: 'firmaBase64',      tipo: 'firma'       },
+    ];
+    for (const t of tipos) {
+      if (!imgs[t.key]) continue;
+      try {
+        console.log('[UPLOAD] subiendo', t.tipo, 'para id', id, 'largo:', imgs[t.key].length);
+        const body = new URLSearchParams({
+          accion: 'subirArchivo',
+          id: id,
+          tipo: t.tipo,
+          data: imgs[t.key]
+        });
+        // no-cors: el browser envía el POST pero no lee la respuesta (evita CORS error)
+        await fetch(GAS_URL, {
+          method: 'POST',
+          mode: 'no-cors',
+          body: body
+        });
+        console.log('[UPLOAD] enviado', t.tipo);
+        // Esperar un poco entre uploads
+        await new Promise(r => setTimeout(r, 1500));
+      } catch(e) {
+        console.warn('[UPLOAD] error', t.tipo, e);
+      }
+    }
   }
 
   async function cargarEnvios() {
@@ -1787,14 +1813,16 @@
     const file = input.files[0];
     const reader = new FileReader();
     reader.onload = function(e) {
-      window._fotoRecepcionBase64 = e.target.result;
-      window._fotoRecepcionFile = file;
-      const prev = document.getElementById('fotoRecepcionPreview');
-      const img = document.getElementById('fotoRecepcionImg');
-      const nom = document.getElementById('fotoRecepcionNombre');
-      if (prev) prev.style.display = 'flex';
-      if (img) img.src = e.target.result;
-      if (nom) nom.textContent = file.name;
+      resizarImagen(e.target.result, 800, function(resized) {
+        window._fotoRecepcionBase64 = resized;
+        window._fotoRecepcionFile = file;
+        const prev = document.getElementById('fotoRecepcionPreview');
+        const img  = document.getElementById('fotoRecepcionImg');
+        const nom  = document.getElementById('fotoRecepcionNombre');
+        if (prev) prev.style.display = 'flex';
+        if (img)  img.src = resized;
+        if (nom)  nom.textContent = file.name;
+      });
     };
     reader.readAsDataURL(file);
   };
@@ -2296,6 +2324,23 @@
     document.getElementById('btnSalida').disabled = true;
     document.getElementById('btnSalida').classList.add('disabled');
 
+  // Redimensionar imagen a max 800px para reducir tamaño base64
+  function resizarImagen(base64, maxPx, callback) {
+    const img = new Image();
+    img.onload = function() {
+      const canvas = document.createElement('canvas');
+      let w = img.width, h = img.height;
+      if (w > maxPx || h > maxPx) {
+        if (w > h) { h = Math.round(h * maxPx / w); w = maxPx; }
+        else       { w = Math.round(w * maxPx / h); h = maxPx; }
+      }
+      canvas.width = w; canvas.height = h;
+      canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+      callback(canvas.toDataURL('image/jpeg', 0.75));
+    };
+    img.src = base64;
+  }
+
     document.getElementById('fotoInput').addEventListener('change', function(e) {
       const file = e.target.files[0];
       if (!file) return;
@@ -2303,15 +2348,15 @@
       document.getElementById('fotoNombre').textContent = file.name;
       const reader = new FileReader();
       reader.onload = ev => {
-        fotoBase64 = ev.target.result;
-        const prev = document.getElementById('fotoPreview');
-        prev.src = fotoBase64;
-        prev.style.display = 'block';
-        // Mostrar panel de preview y ocultar indicador
-        document.getElementById('fotoIndicadorSalida').style.display = 'none';
-        document.getElementById('fotoEvidenciaPreview').style.display = 'flex';
-        // Habilitar botón salida si también hay temperatura
-        window.checkHabilitarSalida();
+        resizarImagen(ev.target.result, 800, function(resized) {
+          fotoBase64 = resized;
+          const prev = document.getElementById('fotoPreview');
+          prev.src = fotoBase64;
+          prev.style.display = 'block';
+          document.getElementById('fotoIndicadorSalida').style.display = 'none';
+          document.getElementById('fotoEvidenciaPreview').style.display = 'flex';
+          window.checkHabilitarSalida();
+        });
       };
       reader.readAsDataURL(file);
     });
