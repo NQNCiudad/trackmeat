@@ -610,7 +610,7 @@
         done++;
         mostrarToast('Subiendo ' + t.label + ' (' + done + '/' + total + ')… ⏳', 'ok');
         const data = imgs[t.key];
-        const CHUNK = 5000;
+        const CHUNK = 7000;
         const totalChunks = Math.ceil(data.length / CHUNK);
         const uploadId = id + '_' + t.tipo + '_' + Date.now(); // key única
         console.log('[UPLOAD] subiendo', t.tipo, 'en', totalChunks, 'chunks');
@@ -627,7 +627,7 @@
           });
         }
         console.log('[UPLOAD] completado', t.tipo);
-        await new Promise(r => setTimeout(r, 300));
+        await new Promise(r => setTimeout(r, 100));
       } catch(e) {
         console.warn('[UPLOAD] error', t.tipo, e.message);
       }
@@ -779,8 +779,9 @@
 
     // Si es una recepción de envío en tránsito, editar la fila existente en Sheet
     const envioActivo = window._envioActivoSeleccionado || window._envioEnCurso;
-    if (!editandoId && envioActivo && envioActivo.sheetId) {
-      editandoId = envioActivo.sheetId;
+    console.log('[REC] envioActivo:', envioActivo ? envioActivo.sheetId : 'null', '| editandoId:', editandoId);
+    if (!editandoId && envioActivo && (envioActivo.sheetId || envioActivo.id)) {
+      editandoId = envioActivo.sheetId || envioActivo.id;
     }
 
     try {
@@ -815,10 +816,15 @@
     if (selR) selR.value = '';
     window._fotoRecepcionFile = null;
     editandoId = null;
-    // Deshabilitar tab Recepción
+    // Deshabilitar tab Recepción solo si no quedan envíos en tránsito
     const tabBtn = document.getElementById('tabRecepcion');
-    if (tabBtn) { tabBtn.style.opacity = '0.4'; tabBtn.style.pointerEvents = 'none'; }
-    switchTab('registro');
+    if (!window._enviosEnCurso || !window._enviosEnCurso.length) {
+      if (tabBtn) { tabBtn.style.opacity = '0.4'; tabBtn.style.pointerEvents = 'none'; }
+      switchTab('registro');
+    } else {
+      // Quedan envíos — actualizar lista de recepción
+      renderEnviosEnTransito();
+    }
     resetForm();
     btn.disabled = false;
     btn.textContent = '✅ Guardar recepción completa';
