@@ -573,7 +573,8 @@
       params.desvios            = d.desvios          || '';
       params.observaciones      = d.observaciones    || '';
       params.sinFotoEvidencia   = d.sinFotoEvidencia ? '1' : '0';
-      params.fotoSalidaBase64   = d.fotoSalidaUrl    || '';
+      // Solo subir foto salida si es un registro nuevo (no edición de recepción)
+      params.fotoSalidaBase64   = (body.accion === 'guardar') ? (d.fotoSalidaUrl || '') : '';
       params.fotoBase64         = d.fotoUrl          || '';
       params.firmaBase64        = d.firmaBase64      || '';
     }
@@ -599,34 +600,41 @@
 
   async function subirImagenesGAS(id, imgs) {
     const tipos = [
-      { key: 'fotoSalidaBase64', tipo: 'fotoSalida'  },
-      { key: 'fotoBase64',       tipo: 'fotoLlegada' },
-      { key: 'firmaBase64',      tipo: 'firma'       },
+      { key: 'fotoSalidaBase64', tipo: 'fotoSalida',  label: 'foto salida'  },
+      { key: 'fotoBase64',       tipo: 'fotoLlegada', label: 'foto llegada' },
+      { key: 'firmaBase64',      tipo: 'firma',       label: 'firma'        },
     ];
+    const total = tipos.filter(t => imgs[t.key]).length;
+    let done = 0;
     for (const t of tipos) {
       if (!imgs[t.key]) continue;
       try {
+        done++;
+        mostrarToast('Subiendo ' + t.label + ' (' + done + '/' + total + ')… ⏳', 'ok');
         const data = imgs[t.key];
-        const CHUNK = 5000; // ~5KB por chunk, bien dentro del límite GET
-        const total = Math.ceil(data.length / CHUNK);
-        console.log('[UPLOAD] subiendo', t.tipo, 'en', total, 'chunks');
-        for (let i = 0; i < total; i++) {
+        const CHUNK = 5000;
+        const totalChunks = Math.ceil(data.length / CHUNK);
+        const uploadId = id + '_' + t.tipo + '_' + Date.now(); // key única
+        console.log('[UPLOAD] subiendo', t.tipo, 'en', totalChunks, 'chunks');
+        for (let i = 0; i < totalChunks; i++) {
           const chunk = data.slice(i * CHUNK, (i + 1) * CHUNK);
           await gasCall({
             accion: 'subirChunk',
             id: id,
             tipo: t.tipo,
+            uploadId: uploadId,
             chunk: chunk,
             idx: i,
-            total: total
+            total: totalChunks
           });
         }
         console.log('[UPLOAD] completado', t.tipo);
-        await new Promise(r => setTimeout(r, 500));
+        await new Promise(r => setTimeout(r, 300));
       } catch(e) {
         console.warn('[UPLOAD] error', t.tipo, e.message);
       }
     }
+    if (total > 0) mostrarToast('Archivos subidos a Drive ✓', 'ok');
   }
 
   async function cargarEnvios() {
