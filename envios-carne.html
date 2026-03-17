@@ -1939,6 +1939,9 @@
     const dId = selD.value;
     const oSuc = SUCURSALES[oId];
     const dSuc = SUCURSALES[dId];
+    // Guardar selección en localStorage para que persista
+    if (oId) localStorage.setItem('suc_origen_active', oId);
+    if (dId) localStorage.setItem('suc_destino_active', dId);
     // Actualizar labels salida/llegada
     const lSal = document.getElementById('labelSalida');
     const lLleg = document.getElementById('labelLlegada');
