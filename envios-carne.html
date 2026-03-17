@@ -588,22 +588,23 @@
     for (const t of tipos) {
       if (!imgs[t.key]) continue;
       try {
-        console.log('[UPLOAD] subiendo', t.tipo, 'largo:', imgs[t.key].length);
-        const payload = JSON.stringify({
-          accion: 'subirArchivo',
-          id: id,
-          tipo: t.tipo,
-          data: imgs[t.key]
-        });
-        const res = await fetch(GAS_URL, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: payload,
-          redirect: 'follow'
-        });
-        const text = await res.text();
-        console.log('[UPLOAD] respuesta', t.tipo, text.slice(0, 100));
-        await new Promise(r => setTimeout(r, 1000));
+        const data = imgs[t.key];
+        const CHUNK = 5000; // ~5KB por chunk, bien dentro del límite GET
+        const total = Math.ceil(data.length / CHUNK);
+        console.log('[UPLOAD] subiendo', t.tipo, 'en', total, 'chunks');
+        for (let i = 0; i < total; i++) {
+          const chunk = data.slice(i * CHUNK, (i + 1) * CHUNK);
+          await gasCall({
+            accion: 'subirChunk',
+            id: id,
+            tipo: t.tipo,
+            chunk: chunk,
+            idx: i,
+            total: total
+          });
+        }
+        console.log('[UPLOAD] completado', t.tipo);
+        await new Promise(r => setTimeout(r, 500));
       } catch(e) {
         console.warn('[UPLOAD] error', t.tipo, e.message);
       }
